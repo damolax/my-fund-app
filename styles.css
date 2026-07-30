@@ -344,3 +344,47 @@ a { color: inherit; text-decoration: none; }
   .form-grid { grid-template-columns: 1fr; }
   .form-grid .field.full { grid-column: auto; }
 }
+
+/* Authentication helpers */
+.password-input-wrap { position: relative; display: flex; align-items: center; }
+.password-input-wrap input { width: 100%; padding-right: 64px; }
+.password-toggle { position: absolute; right: 8px; border: 0; background: var(--soft); color: var(--ink); border-radius: 7px; padding: 6px 9px; font-size: 10px; font-weight: 800; cursor: pointer; }
+.text-button { border: 0; background: transparent; color: var(--accent-dark, #7b5a12); font-weight: 750; font-size: 11px; cursor: pointer; padding: 7px 0; }
+.auth-help { display: block; margin: -5px 0 11px auto; }
+.auth-form-heading { margin-bottom: 19px; }
+.auth-form-heading h2 { margin: 0 0 6px; font-size: 20px; }
+.auth-form-heading p { margin: 0; color: var(--muted); line-height: 1.5; font-size: 12px; }
+
+/* Platform admin */
+.admin-loading { min-height: 170px; display: grid; place-items: center; color: var(--muted); }
+.admin-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.admin-funds-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+.admin-fund-card { border: 1px solid var(--line); background: var(--soft); border-radius: 13px; padding: 15px; display: flex; flex-direction: column; gap: 5px; }
+.admin-fund-card > span { color: var(--muted); font-size: 11px; font-weight: 850; letter-spacing: .08em; }
+.admin-fund-card strong { font-size: 22px; letter-spacing: -.03em; }
+.admin-fund-card small { color: var(--muted); line-height: 1.45; }
+.admin-account-list { display: flex; flex-direction: column; gap: 16px; }
+.admin-account-card { padding: 0; overflow: hidden; }
+.admin-account-head { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; padding: 20px; }
+.admin-account-head h2 { margin: 4px 0; font-size: 18px; overflow-wrap: anywhere; }
+.admin-account-head p { margin: 0; color: var(--muted); }
+.admin-account-totals { display: flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; }
+.admin-meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 13px 20px; background: var(--soft); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.admin-meta-grid span { color: var(--muted); font-size: 11px; }
+.admin-meta-grid strong { color: var(--ink); }
+.balance-pill { display: inline-flex; align-items: center; margin: 2px 5px 2px 0; border-radius: 999px; padding: 5px 8px; background: #edf6f0; color: #245a3f; font-size: 10px; font-weight: 800; white-space: nowrap; }
+.negative-pill { background: #fff0ee; color: #a5392d; }
+.muted-text, .empty-cell, .empty-inline { color: var(--muted); font-size: 11px; }
+.empty-cell { text-align: center; padding: 24px !important; }
+
+@media (max-width: 1000px) {
+  .admin-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 620px) {
+  .admin-summary-grid { grid-template-columns: 1fr; }
+  .admin-account-head { flex-direction: column; }
+  .admin-account-totals { justify-content: flex-start; }
+  .admin-meta-grid { grid-template-columns: 1fr; }
+}

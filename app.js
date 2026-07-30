@@ -2,9 +2,10 @@
   'use strict'
 
   const STORAGE_KEY = 'my-fund-app-v1'
-  const CONFIG = window.MY_FUND_CONFIG || window.FHG_CONFIG || {}
+  const CONFIG = window.MY_FUND_CONFIG || {}
   const CLOUD_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
   const db = CLOUD_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
+  const ADMIN_EMAIL = String(CONFIG.adminEmail || 'oyekunleolalekan3168@gmail.com').trim().toLowerCase()
 
   const DEFAULT_DATA = {
     workspace: {
@@ -28,6 +29,10 @@
   let viewerTimer = null
   let busy = false
   let toastTimer = null
+  let adminState = null
+  let adminLoading = false
+  let adminError = ''
+  let passwordRecoveryMode = false
 
   const ui = {
     mobileOpen: false,
@@ -129,6 +134,29 @@
 
   function saveLocal() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+  }
+
+  function signedInEmail() {
+    return String(session?.user?.email || '').trim().toLowerCase()
+  }
+
+  function isPlatformAdmin() {
+    return CLOUD_ENABLED && signedInEmail() === ADMIN_EMAIL
+  }
+
+  async function touchAppUser() {
+    if (!CLOUD_ENABLED || !session?.user) return
+    const result = await db.rpc('mfa_touch_app_user', { p_email: signedInEmail() })
+    if (result.error) throw result.error
+  }
+
+  async function refreshAdmin() {
+    if (!isPlatformAdmin()) throw new Error('Platform admin access is restricted.')
+    const result = await db.rpc('mfa_admin_overview')
+    if (result.error) throw result.error
+    adminState = result.data || { users: [], workspaces: [], people: [], transactions: [], budgets: [], goals: [] }
+    adminError = ''
+    return adminState
   }
 
   function normalizeCloudData(payload) {
@@ -361,6 +389,7 @@
       ['people', '◉', 'People'],
       ['transactions', '≡', 'Transactions'],
       ['reports', '⇩', 'Reports'],
+      ...(isPlatformAdmin() ? [['admin', '◆', 'Platform admin']] : []),
       ['settings', '⚙', 'Settings'],
     ]
       .map(
@@ -375,7 +404,7 @@
       <div class="app-shell">
         <aside class="sidebar ${ui.mobileOpen ? 'open' : ''}">
           <div class="brand-row">
-            <div class="brand-mark">F</div>
+            <div class="brand-mark">M</div>
             <div><strong>${escapeHtml(state.workspace.name || 'My Fund App')}</strong><span>Held funds tracker</span></div>
             <button class="icon-button sidebar-close" data-action="close-mobile">×</button>
           </div>
@@ -389,7 +418,7 @@
         <main class="main-area">
           <header class="topbar">
             <button class="icon-button mobile-menu" data-action="open-mobile">☰</button>
-            <div class="topbar-title"><span>FHG money management</span></div>
+            <div class="topbar-title"><span>My Fund App</span></div>
             <button class="icon-button" data-action="refresh" title="Refresh">↻</button>
           </header>
           ${
@@ -428,6 +457,8 @@
         if (created.error) throw created.error
         workspace = created.data
       }
+
+      await touchAppUser()
 
       const [peopleResult, transactionResult, budgetResult, goalResult] = await Promise.all([
         db.from('mfa_people').select('*').eq('workspace_id', workspace.id).order('created_at'),
@@ -1171,6 +1202,114 @@
     return shell(content, 'reports')
   }
 
+  function adminBalanceForPerson(personId, currency, payload = adminState) {
+    const records = (payload?.transactions || []).filter(
+      (item) => item.person_id === personId && item.currency === currency,
+    )
+    const income = records
+      .filter((item) => item.type === 'income')
+      .reduce((sum, item) => sum + num(item.amount), 0)
+    const expenses = records
+      .filter((item) => item.type === 'expense')
+      .reduce((sum, item) => sum + num(item.amount), 0)
+    return { income: round(income), expenses: round(expenses), balance: round(income - expenses) }
+  }
+
+  function adminCurrenciesForPeople(people, payload = adminState) {
+    const ids = new Set(people.map((person) => person.id))
+    return [...new Set((payload?.transactions || []).filter((item) => ids.has(item.person_id)).map((item) => item.currency))]
+  }
+
+  function formatTimestamp(value) {
+    if (!value) return 'Never'
+    try {
+      return new Intl.DateTimeFormat('en', {
+        day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit',
+      }).format(new Date(value))
+    } catch {
+      return String(value)
+    }
+  }
+
+  function renderAdmin() {
+    if (!isPlatformAdmin()) {
+      return shell(`<section>${pageHeader('Platform admin', 'Access denied', 'This page is restricted to the configured platform administrator.')}</section>`, 'admin')
+    }
+
+    if (adminLoading && !adminState) {
+      return shell(`<section>${pageHeader('Platform admin', 'Loading accounts', 'Reading My Fund App accounts and tracked balances…')}<div class="panel admin-loading">Loading platform records…</div></section>`, 'admin')
+    }
+
+    if (adminError && !adminState) {
+      return shell(`<section>${pageHeader('Platform admin', 'Unable to load', adminError)}<button class="primary-button" data-action="refresh-admin">Try again</button></section>`, 'admin')
+    }
+
+    const payload = adminState || { users: [], workspaces: [], people: [], transactions: [], budgets: [], goals: [] }
+    const users = payload.users || []
+    const workspaces = payload.workspaces || []
+    const people = payload.people || []
+    const transactions = payload.transactions || []
+    const currencies = [...new Set(transactions.map((item) => item.currency))]
+
+    const fundCards = currencies.length
+      ? currencies.map((currency) => {
+          const positions = people.map((person) => adminBalanceForPerson(person.id, currency, payload))
+          const positive = round(positions.reduce((sum, item) => sum + Math.max(item.balance, 0), 0))
+          const borrowed = round(positions.reduce((sum, item) => sum + Math.abs(Math.min(item.balance, 0)), 0))
+          return `<article class="admin-fund-card"><span>${currency}</span><strong>${money(positive - borrowed, currency)}</strong><small>${money(positive, currency)} positive · ${money(borrowed, currency)} borrowed</small></article>`
+        }).join('')
+      : '<div class="empty-inline">No transactions have been recorded yet.</div>'
+
+    const accountPanels = users.length
+      ? users.map((user) => {
+          const workspace = workspaces.find((item) => item.owner_id === user.user_id)
+          const accountPeople = workspace ? people.filter((item) => item.workspace_id === workspace.id) : []
+          const personIds = new Set(accountPeople.map((item) => item.id))
+          const accountTransactions = transactions.filter((item) => personIds.has(item.person_id))
+          const accountCurrencies = adminCurrenciesForPeople(accountPeople, payload)
+          const accountTotals = accountCurrencies.map((currency) => {
+            const total = round(accountPeople.reduce((sum, person) => sum + adminBalanceForPerson(person.id, currency, payload).balance, 0))
+            return `<span class="balance-pill ${total < 0 ? 'negative-pill' : ''}">${money(total, currency)}</span>`
+          }).join('') || '<span class="muted-text">No funds recorded</span>'
+          const rows = accountPeople.length
+            ? accountPeople.map((person) => {
+                const pc = [...new Set(accountTransactions.filter((item) => item.person_id === person.id).map((item) => item.currency))]
+                const balances = pc.map((currency) => {
+                  const position = adminBalanceForPerson(person.id, currency, payload)
+                  return `<span class="balance-pill ${position.balance < 0 ? 'negative-pill' : ''}">${money(position.balance, currency)}</span>`
+                }).join('') || '<span class="muted-text">No records</span>'
+                return `<tr><td><strong>${escapeHtml(person.name)}</strong></td><td>${balances}</td><td>${accountTransactions.filter((item) => item.person_id === person.id).length}</td><td>${formatTimestamp(person.created_at)}</td></tr>`
+              }).join('')
+            : '<tr><td colspan="4" class="empty-cell">This account has not added anyone yet.</td></tr>'
+          return `<article class="panel admin-account-card">
+            <div class="admin-account-head">
+              <div><span class="eyebrow">Account</span><h2>${escapeHtml(user.email || 'Unknown email')}</h2><p>${escapeHtml(workspace?.name || 'Workspace not created yet')}</p></div>
+              <div class="admin-account-totals">${accountTotals}</div>
+            </div>
+            <div class="admin-meta-grid">
+              <span><strong>${accountPeople.length}</strong> tracked people</span>
+              <span><strong>${accountTransactions.length}</strong> transactions</span>
+              <span>Created ${formatTimestamp(user.created_at)}</span>
+              <span>Last active ${formatTimestamp(user.last_seen_at)}</span>
+            </div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th>Person</th><th>Current balance</th><th>Records</th><th>Added</th></tr></thead><tbody>${rows}</tbody></table></div>
+          </article>`
+        }).join('')
+      : '<div class="panel empty-state"><h2>No My Fund App accounts yet</h2><p>Accounts appear here after they sign in to this app.</p></div>'
+
+    const content = `
+      ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<button class="secondary-button" data-action="refresh-admin">↻ Refresh</button>')}
+      <section class="summary-grid admin-summary-grid">
+        ${summaryCard('App accounts', String(users.length), '◎', 'Only users who opened My Fund App')}
+        ${summaryCard('Tracked people', String(people.length), '◉', 'Across every My Fund App workspace')}
+        ${summaryCard('Transactions', String(transactions.length), '≡', 'Income and expenses recorded')}
+        ${summaryCard('Administrator', ADMIN_EMAIL, '◆', 'Platform-wide read-only access')}
+      </section>
+      <section class="panel"><div class="panel-heading"><div><h2>Net funds across all accounts</h2><p>Negative balances are deducted from positive balances. Currencies remain separate.</p></div></div><div class="admin-funds-grid">${fundCards}</div></section>
+      <section class="admin-account-list">${accountPanels}</section>`
+    return shell(content, 'admin')
+  }
+
   function renderSettings() {
     const content = `
       ${pageHeader('Settings', 'Workspace settings', 'Upkeep is a percentage-based monthly limit. PV is set separately for each person and month.')}
@@ -1195,30 +1334,70 @@
     return shell(content, 'settings')
   }
 
-  function renderAuth(message = '') {
+  function authBrand() {
+    return `<div class="auth-brand">
+      <div class="brand-mark large-brand">M</div>
+      <h1>My Fund App</h1>
+      <p>Track income, actual expenses, monthly limits, borrowed balances and everything you currently hold.</p>
+    </div>`
+  }
+
+  function passwordField(name, label, idValue, options = {}) {
+    const minlength = options.minlength || 6
+    const autocomplete = options.autocomplete || 'current-password'
+    return `<label class="field"><span>${escapeHtml(label)}</span><div class="password-input-wrap"><input id="${idValue}" name="${name}" type="password" minlength="${minlength}" autocomplete="${autocomplete}" required><button type="button" class="password-toggle" data-action="toggle-password" data-target="${idValue}">Show</button></div></label>`
+  }
+
+  function renderAuth(message = '', mode = 'signin', email = '') {
+    const signin = mode !== 'signup'
     document.getElementById('app').innerHTML = `
       <div class="auth-page">
-        <div class="auth-brand">
-          <div class="brand-mark large-brand">F</div>
-          <h1>My Fund App</h1>
-          <p>Track income, actual expenses, monthly limits, borrowed balances and everything you currently hold.</p>
-        </div>
-        <form class="auth-card" id="auth-form" data-mode="signin">
+        ${authBrand()}
+        <form class="auth-card" id="auth-form" data-mode="${signin ? 'signin' : 'signup'}">
           <div class="auth-tabs">
-            <button type="button" class="active" data-action="auth-mode" data-mode="signin">Sign in</button>
-            <button type="button" data-action="auth-mode" data-mode="signup">Create account</button>
+            <button type="button" class="${signin ? 'active' : ''}" data-action="auth-mode" data-mode="signin">Sign in</button>
+            <button type="button" class="${signin ? '' : 'active'}" data-action="auth-mode" data-mode="signup">Create account</button>
           </div>
-          <label class="field"><span>Email</span><input name="email" type="email" required></label>
-          <label class="field"><span>Password</span><input name="password" type="password" minlength="6" required></label>
+          <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" value="${escapeHtml(email)}" required></label>
+          ${passwordField('password', 'Password', 'auth-password')}
+          ${signin ? '<button type="button" class="text-button auth-help" data-action="forgot-password">Forgot password?</button>' : ''}
           ${message ? `<div class="info-box">${escapeHtml(message)}</div>` : ''}
-          <button class="primary-button full-width">Sign in</button>
+          <button type="submit" class="primary-button full-width">${signin ? 'Sign in' : 'Create account'}</button>
+        </form>
+      </div>`
+  }
+
+  function renderForgotPassword(message = '', email = '') {
+    document.getElementById('app').innerHTML = `
+      <div class="auth-page">
+        ${authBrand()}
+        <form class="auth-card" id="forgot-password-form">
+          <div class="auth-form-heading"><h2>Reset your password</h2><p>Enter your account email and we will send a secure reset link.</p></div>
+          <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" value="${escapeHtml(email)}" required></label>
+          ${message ? `<div class="info-box">${escapeHtml(message)}</div>` : ''}
+          <button type="submit" class="primary-button full-width">Send reset link</button>
+          <button type="button" class="text-button full-width" data-action="back-to-signin">Back to sign in</button>
+        </form>
+      </div>`
+  }
+
+  function renderPasswordReset(message = '') {
+    document.getElementById('app').innerHTML = `
+      <div class="auth-page">
+        ${authBrand()}
+        <form class="auth-card" id="reset-password-form">
+          <div class="auth-form-heading"><h2>Choose a new password</h2><p>Use at least six characters.</p></div>
+          ${passwordField('password', 'New password', 'new-password', { autocomplete: 'new-password' })}
+          ${passwordField('confirm_password', 'Confirm new password', 'confirm-new-password', { autocomplete: 'new-password' })}
+          ${message ? `<div class="info-box">${escapeHtml(message)}</div>` : ''}
+          <button type="submit" class="primary-button full-width">Update password</button>
         </form>
       </div>`
   }
 
   async function loadViewer(token) {
     clearInterval(viewerTimer)
-    document.getElementById('app').innerHTML = '<div class="full-page-loading"><div class="loading-mark">F</div><span>Opening the read-only dashboard…</span></div>'
+    document.getElementById('app').innerHTML = '<div class="full-page-loading"><div class="loading-mark">M</div><span>Opening the read-only dashboard…</span></div>'
     try {
       let payload
       if (CLOUD_ENABLED) {
@@ -1286,7 +1465,7 @@
       }, 5000)
     } catch (error) {
       document.getElementById('app').innerHTML = `
-        <div class="viewer-error"><div class="brand-mark">F</div><h1>Viewer link unavailable</h1><p>${escapeHtml(error.message)}</p></div>`
+        <div class="viewer-error"><div class="brand-mark">M</div><h1>Viewer link unavailable</h1><p>${escapeHtml(error.message)}</p></div>`
     }
   }
 
@@ -1357,7 +1536,7 @@
     document.getElementById('app').innerHTML = `
       <div class="viewer-page">
         <header class="viewer-header">
-          <div class="brand-row viewer-brand"><div class="brand-mark">F</div><div><strong>${escapeHtml(payload.workspace.name || 'My Fund App')}</strong><span>Read-only finance dashboard</span></div></div>
+          <div class="brand-row viewer-brand"><div class="brand-mark">M</div><div><strong>${escapeHtml(payload.workspace.name || 'My Fund App')}</strong><span>Read-only finance dashboard</span></div></div>
           <div><div class="live-badge"><span class="status-dot"></span>Updated automatically</div><div class="viewer-refresh">Checks every 5 seconds</div></div>
         </header>
         <main class="viewer-main">
@@ -1399,6 +1578,20 @@
     else if (route.segments[0] === 'person' && route.segments[1]) html = renderPerson(route.segments[1])
     else if (route.path === '/transactions') html = renderTransactions()
     else if (route.path === '/reports') html = renderReports()
+    else if (route.path === '/admin') {
+      if (!isPlatformAdmin()) {
+        go('/dashboard')
+        html = renderDashboard()
+      } else {
+        if (!adminState && !adminLoading) {
+          adminLoading = true
+          refreshAdmin()
+            .catch((error) => { adminError = error.message || 'Unable to load platform records.' })
+            .finally(() => { adminLoading = false; if (getRoute().path === '/admin') render() })
+        }
+        html = renderAdmin()
+      }
+    }
     else if (route.path === '/settings') html = renderSettings()
     else {
       go('/dashboard')
@@ -1805,6 +1998,50 @@
       return
     }
 
+    if (form.id === 'forgot-password-form') {
+      event.preventDefault()
+      if (!CLOUD_ENABLED || busy) return
+      busy = true
+      const values = Object.fromEntries(new FormData(form).entries())
+      try {
+        const redirectTo = `${location.origin}${location.pathname}`
+        const result = await db.auth.resetPasswordForEmail(values.email, { redirectTo })
+        if (result.error) throw result.error
+        renderForgotPassword('Reset link sent. Check your inbox and spam folder.', values.email)
+      } catch (error) {
+        renderForgotPassword(error.message || 'Unable to send the reset email.', values.email)
+      } finally {
+        busy = false
+      }
+      return
+    }
+
+    if (form.id === 'reset-password-form') {
+      event.preventDefault()
+      if (!CLOUD_ENABLED || busy) return
+      busy = true
+      const values = Object.fromEntries(new FormData(form).entries())
+      if (values.password !== values.confirm_password) {
+        renderPasswordReset('The passwords do not match.')
+        busy = false
+        return
+      }
+      try {
+        const result = await db.auth.updateUser({ password: values.password })
+        if (result.error) throw result.error
+        passwordRecoveryMode = false
+        await refreshCloud()
+        go('/dashboard')
+        render()
+        toast('Password updated successfully.')
+      } catch (error) {
+        renderPasswordReset(error.message || 'Unable to update the password.')
+      } finally {
+        busy = false
+      }
+      return
+    }
+
     if (form.id === 'auth-form') {
       event.preventDefault()
       if (!CLOUD_ENABLED || busy) return
@@ -1815,15 +2052,17 @@
         const result =
           mode === 'signin'
             ? await db.auth.signInWithPassword({ email: values.email, password: values.password })
-            : await db.auth.signUp({ email: values.email, password: values.password })
+            : await db.auth.signUp({
+                email: values.email,
+                password: values.password,
+                options: { data: { app_name: 'my_fund_app' } },
+              })
         if (result.error) throw result.error
         if (mode === 'signup' && !result.data.session) {
           renderAuth('Account created. Check your email if confirmation is enabled in Supabase.')
         }
       } catch (error) {
-        renderAuth(error.message)
-        const nextForm = document.getElementById('auth-form')
-        if (nextForm) nextForm.dataset.mode = mode
+        renderAuth(error.message, mode, values.email)
       } finally {
         busy = false
       }
@@ -1834,6 +2073,41 @@
     const target = event.target.closest('[data-action]')
     if (!target) return
     const action = target.dataset.action
+
+    if (action === 'toggle-password') {
+      const input = document.getElementById(target.dataset.target)
+      if (!input) return
+      const reveal = input.type === 'password'
+      input.type = reveal ? 'text' : 'password'
+      target.textContent = reveal ? 'Hide' : 'Show'
+      target.setAttribute('aria-pressed', String(reveal))
+      return
+    }
+    if (action === 'forgot-password') {
+      const email = document.querySelector('#auth-form input[name="email"]')?.value || ''
+      renderForgotPassword('', email)
+      return
+    }
+    if (action === 'back-to-signin') {
+      renderAuth()
+      return
+    }
+    if (action === 'refresh-admin') {
+      if (!isPlatformAdmin()) return
+      adminLoading = true
+      adminError = ''
+      try {
+        await refreshAdmin()
+        render()
+        toast('Admin records refreshed.')
+      } catch (error) {
+        adminError = error.message || 'Unable to refresh platform records.'
+        render()
+      } finally {
+        adminLoading = false
+      }
+      return
+    }
 
     if (action === 'open-mobile') {
       ui.mobileOpen = true
@@ -1962,8 +2236,10 @@
     }
     if (action === 'refresh') {
       try {
-        if (CLOUD_ENABLED) await refreshCloud()
-        else state = loadLocal()
+        if (CLOUD_ENABLED) {
+          await refreshCloud()
+          if (isPlatformAdmin() && getRoute().path === '/admin') await refreshAdmin()
+        } else state = loadLocal()
         render()
         toast('Records refreshed.')
       } catch (error) {
@@ -1972,18 +2248,14 @@
       return
     }
     if (action === 'signout') {
+      adminState = null
       await db.auth.signOut()
       return
     }
     if (action === 'auth-mode') {
-      const form = document.getElementById('auth-form')
-      if (!form) return
-      form.dataset.mode = target.dataset.mode
-      form.querySelectorAll('.auth-tabs button').forEach((button) =>
-        button.classList.toggle('active', button.dataset.mode === target.dataset.mode),
-      )
-      const submit = form.querySelector('button[type="submit"], button:not([type])')
-      if (submit) submit.textContent = target.dataset.mode === 'signin' ? 'Sign in' : 'Create account'
+      const email = document.querySelector('#auth-form input[name="email"]')?.value || ''
+      renderAuth('', target.dataset.mode, email)
+      return
     }
   }
 
@@ -2026,15 +2298,20 @@
 
     const sessionResult = await db.auth.getSession()
     session = sessionResult.data.session
-    db.auth.onAuthStateChange(async (_event, nextSession) => {
+    db.auth.onAuthStateChange(async (event, nextSession) => {
       session = nextSession
+      if (event === 'PASSWORD_RECOVERY') {
+        passwordRecoveryMode = true
+        renderPasswordReset()
+        return
+      }
       if (session) {
         try {
           await refreshCloud()
           if (!location.hash || getRoute().path === '/') go('/dashboard')
-          render()
+          if (!passwordRecoveryMode) render()
         } catch {
-          render()
+          if (!passwordRecoveryMode) render()
         }
       } else {
         state = structuredClone(DEFAULT_DATA)
