@@ -1,8 +1,8 @@
-# FHG Funds — Final Product Plan
+# My Fund App — Final Product Plan
 
 ## Product goal
 
-FHG Funds is a focused held-money tracker. An account owner records income and actual expenses for several people, while each person gets a secure read-only dashboard.
+My Fund App is a focused held-money tracker. An account owner records income and actual expenses for several people, while each person gets a secure read-only dashboard.
 
 ## Non-negotiable financial rules
 
@@ -59,3 +59,8 @@ Reports include opening balance, period income, period expenses, closing balance
 - Immediate local demo mode using browser storage.
 - Supabase cloud mode for accounts, protected data, cross-device access and live viewer links.
 - Realtime refresh for owner screens and five-second secure polling for anonymous viewer links.
+
+
+## Supabase isolation
+
+My Fund App may share the Elevate Office Tracker Supabase project, but it uses only database objects prefixed with `mfa_`. Row Level Security limits every signed-in owner to their own My Fund App workspace.

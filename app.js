@@ -1,15 +1,15 @@
 (() => {
   'use strict'
 
-  const STORAGE_KEY = 'fhg-funds-standalone-v1'
-  const CONFIG = window.FHG_CONFIG || {}
+  const STORAGE_KEY = 'my-fund-app-v1'
+  const CONFIG = window.MY_FUND_CONFIG || window.FHG_CONFIG || {}
   const CLOUD_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
   const db = CLOUD_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
 
   const DEFAULT_DATA = {
     workspace: {
       id: 'local-workspace',
-      name: 'FHG Funds',
+      name: 'My Fund App',
       default_currency: 'NGN',
       upkeep_percentage: 20,
     },
@@ -376,7 +376,7 @@
         <aside class="sidebar ${ui.mobileOpen ? 'open' : ''}">
           <div class="brand-row">
             <div class="brand-mark">F</div>
-            <div><strong>${escapeHtml(state.workspace.name || 'FHG Funds')}</strong><span>Held funds tracker</span></div>
+            <div><strong>${escapeHtml(state.workspace.name || 'My Fund App')}</strong><span>Held funds tracker</span></div>
             <button class="icon-button sidebar-close" data-action="close-mobile">×</button>
           </div>
           <nav class="nav-list">${nav}</nav>
@@ -408,7 +408,7 @@
     if (!CLOUD_ENABLED || !session?.user) return
     try {
       let workspaceResult = await db
-        .from('workspaces')
+        .from('mfa_workspaces')
         .select('*')
         .eq('owner_id', session.user.id)
         .maybeSingle()
@@ -416,10 +416,10 @@
       let workspace = workspaceResult.data
       if (!workspace) {
         const created = await db
-          .from('workspaces')
+          .from('mfa_workspaces')
           .insert({
             owner_id: session.user.id,
-            name: 'FHG Funds',
+            name: 'My Fund App',
             default_currency: 'NGN',
             upkeep_percentage: 20,
           })
@@ -430,15 +430,15 @@
       }
 
       const [peopleResult, transactionResult, budgetResult, goalResult] = await Promise.all([
-        db.from('people').select('*').eq('workspace_id', workspace.id).order('created_at'),
+        db.from('mfa_people').select('*').eq('workspace_id', workspace.id).order('created_at'),
         db
-          .from('transactions')
+          .from('mfa_transactions')
           .select('*')
           .eq('workspace_id', workspace.id)
           .order('date', { ascending: false })
           .order('created_at', { ascending: false }),
-        db.from('monthly_budgets').select('*').eq('workspace_id', workspace.id),
-        db.from('goals').select('*').eq('workspace_id', workspace.id),
+        db.from('mfa_monthly_budgets').select('*').eq('workspace_id', workspace.id),
+        db.from('mfa_goals').select('*').eq('workspace_id', workspace.id),
       ])
       for (const result of [peopleResult, transactionResult, budgetResult, goalResult]) {
         if (result.error) throw result.error
@@ -466,10 +466,10 @@
       if (!route.path.startsWith('/view/')) render()
     }
     realtimeChannel = db
-      .channel(`fhg-${state.workspace.id}`)
+      .channel(`mfa-${state.workspace.id}`)
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'people', filter: `workspace_id=eq.${state.workspace.id}` },
+        { event: '*', schema: 'public', table: 'mfa_people', filter: `workspace_id=eq.${state.workspace.id}` },
         reload,
       )
       .on(
@@ -477,7 +477,7 @@
         {
           event: '*',
           schema: 'public',
-          table: 'transactions',
+          table: 'mfa_transactions',
           filter: `workspace_id=eq.${state.workspace.id}`,
         },
         reload,
@@ -487,14 +487,14 @@
         {
           event: '*',
           schema: 'public',
-          table: 'monthly_budgets',
+          table: 'mfa_monthly_budgets',
           filter: `workspace_id=eq.${state.workspace.id}`,
         },
         reload,
       )
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'goals', filter: `workspace_id=eq.${state.workspace.id}` },
+        { event: '*', schema: 'public', table: 'mfa_goals', filter: `workspace_id=eq.${state.workspace.id}` },
         reload,
       )
       .subscribe()
@@ -520,7 +520,7 @@
       return person
     }
     const result = await db
-      .from('people')
+      .from('mfa_people')
       .insert({ workspace_id: state.workspace.id, name: clean })
       .select('*')
       .single()
@@ -539,7 +539,7 @@
       })
       return
     }
-    const result = await db.from('people').delete().eq('id', personId)
+    const result = await db.from('mfa_people').delete().eq('id', personId)
     if (result.error) throw result.error
     await refreshCloud()
   }
@@ -565,7 +565,7 @@
       await mutateLocal((draft) => draft.transactions.unshift(payload))
       return payload
     }
-    const result = await db.from('transactions').insert({
+    const result = await db.from('mfa_transactions').insert({
       workspace_id: payload.workspace_id,
       person_id: payload.person_id,
       type: payload.type,
@@ -618,7 +618,7 @@
       })
       return
     }
-    const result = await db.from('transactions').delete().eq('id', transactionId)
+    const result = await db.from('mfa_transactions').delete().eq('id', transactionId)
     if (result.error) throw result.error
     await refreshCloud()
   }
@@ -649,7 +649,7 @@
       })
       return
     }
-    const result = await db.from('monthly_budgets').upsert(
+    const result = await db.from('mfa_monthly_budgets').upsert(
       {
         workspace_id: state.workspace.id,
         person_id: personId,
@@ -683,7 +683,7 @@
       await mutateLocal((draft) => draft.goals.push(payload))
       return
     }
-    const result = await db.from('goals').insert({
+    const result = await db.from('mfa_goals').insert({
       workspace_id: payload.workspace_id,
       person_id: payload.person_id,
       name: payload.name,
@@ -704,14 +704,14 @@
       })
       return
     }
-    const result = await db.from('goals').delete().eq('id', goalId)
+    const result = await db.from('mfa_goals').delete().eq('id', goalId)
     if (result.error) throw result.error
     await refreshCloud()
   }
 
   async function updateWorkspace(values) {
     const changes = {
-      name: values.name.trim() || 'FHG Funds',
+      name: values.name.trim() || 'My Fund App',
       default_currency: String(values.default_currency || 'NGN').trim().toUpperCase(),
       upkeep_percentage: Math.max(0, Math.min(100, round(values.upkeep_percentage))),
     }
@@ -721,7 +721,7 @@
       })
       return
     }
-    const result = await db.from('workspaces').update(changes).eq('id', state.workspace.id)
+    const result = await db.from('mfa_workspaces').update(changes).eq('id', state.workspace.id)
     if (result.error) throw result.error
     await refreshCloud()
   }
@@ -737,7 +737,7 @@
       return token
     }
     const result = await db
-      .from('people')
+      .from('mfa_people')
       .update({ share_token: token })
       .eq('id', personId)
       .select('share_token')
@@ -1200,7 +1200,7 @@
       <div class="auth-page">
         <div class="auth-brand">
           <div class="brand-mark large-brand">F</div>
-          <h1>FHG Funds</h1>
+          <h1>My Fund App</h1>
           <p>Track income, actual expenses, monthly limits, borrowed balances and everything you currently hold.</p>
         </div>
         <form class="auth-card" id="auth-form" data-mode="signin">
@@ -1222,7 +1222,7 @@
     try {
       let payload
       if (CLOUD_ENABLED) {
-        const result = await db.rpc('get_person_public_view', { p_token: token })
+        const result = await db.rpc('mfa_get_person_public_view', { p_token: token })
         if (result.error) throw result.error
         if (!result.data) throw new Error('This viewer link is invalid or has been replaced.')
         payload = {
@@ -1253,7 +1253,7 @@
         try {
           let refreshed
           if (CLOUD_ENABLED) {
-            const result = await db.rpc('get_person_public_view', { p_token: token })
+            const result = await db.rpc('mfa_get_person_public_view', { p_token: token })
             if (!result.error && result.data) {
               refreshed = {
                 workspace: result.data.workspace,
@@ -1357,7 +1357,7 @@
     document.getElementById('app').innerHTML = `
       <div class="viewer-page">
         <header class="viewer-header">
-          <div class="brand-row viewer-brand"><div class="brand-mark">F</div><div><strong>${escapeHtml(payload.workspace.name || 'FHG Funds')}</strong><span>Read-only finance dashboard</span></div></div>
+          <div class="brand-row viewer-brand"><div class="brand-mark">F</div><div><strong>${escapeHtml(payload.workspace.name || 'My Fund App')}</strong><span>Read-only finance dashboard</span></div></div>
           <div><div class="live-badge"><span class="status-dot"></span>Updated automatically</div><div class="viewer-refresh">Checks every 5 seconds</div></div>
         </header>
         <main class="viewer-main">
@@ -1574,7 +1574,7 @@
           .join(','),
       )
       .join('\n')
-    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `fhg-records-${today()}.csv`)
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `my-fund-app-records-${today()}.csv`)
   }
 
   async function exportXlsx() {
@@ -1610,7 +1610,7 @@
     const workbook = window.XLSX.utils.book_new()
     window.XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary')
     window.XLSX.utils.book_append_sheet(workbook, transactionSheet, 'Transactions')
-    window.XLSX.writeFile(workbook, `fhg-funds-${range.start || 'all-time'}-${range.end || today()}.xlsx`)
+    window.XLSX.writeFile(workbook, `my-fund-app-${range.start || 'all-time'}-${range.end || today()}.xlsx`)
   }
 
   async function exportPdf() {
@@ -1624,7 +1624,7 @@
     if (window.jspdf?.jsPDF) {
       const doc = new window.jspdf.jsPDF({ orientation: 'landscape' })
       doc.setFontSize(18)
-      doc.text(state.workspace.name || 'FHG Funds', 14, 16)
+      doc.text(state.workspace.name || 'My Fund App', 14, 16)
       doc.setFontSize(10)
       doc.text(
         `Financial records · ${range.start ? `${formatDate(range.start)} to ${formatDate(range.end)}` : 'All time'} · Generated ${formatDate(today())}`,
@@ -1671,7 +1671,7 @@
           y += 6
         })
       }
-      doc.save(`fhg-funds-${range.start || 'all-time'}-${range.end || today()}.pdf`)
+      doc.save(`my-fund-app-${range.start || 'all-time'}-${range.end || today()}.pdf`)
       return
     }
 
@@ -1691,14 +1691,14 @@
         (item) => `<tr><td>${formatDate(item.date)}</td><td>${escapeHtml(item.person_name)}</td><td>${escapeHtml(item.type)}</td><td>${escapeHtml(item.category || '')}</td><td>${escapeHtml(item.description)}</td><td>${money(item.amount, item.currency)}</td></tr>`,
       )
       .join('')
-    reportWindow.document.write(`<!doctype html><html><head><title>FHG Funds Report</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#15221d}h1{margin-bottom:4px}p{color:#68756f}table{width:100%;border-collapse:collapse;margin:18px 0;font-size:11px}th,td{border:1px solid #dfe5e1;padding:7px;text-align:left}th{background:#14251f;color:white}@media print{button{display:none}}</style></head><body><h1>${escapeHtml(state.workspace.name)}</h1><p>${range.start ? `${formatDate(range.start)} to ${formatDate(range.end)}` : 'All time'}</p><button onclick="window.print()">Save as PDF / Print</button><h2>Summary</h2><table><thead><tr><th>Person</th><th>Currency</th><th>Opening</th><th>Income</th><th>Expenses</th><th>Closing</th></tr></thead><tbody>${summaryHtml}</tbody></table><h2>Transactions</h2><table><thead><tr><th>Date</th><th>Person</th><th>Type</th><th>Category</th><th>Description</th><th>Amount</th></tr></thead><tbody>${transactionHtml}</tbody></table></body></html>`)
+    reportWindow.document.write(`<!doctype html><html><head><title>My Fund App Report</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#15221d}h1{margin-bottom:4px}p{color:#68756f}table{width:100%;border-collapse:collapse;margin:18px 0;font-size:11px}th,td{border:1px solid #dfe5e1;padding:7px;text-align:left}th{background:#14251f;color:white}@media print{button{display:none}}</style></head><body><h1>${escapeHtml(state.workspace.name)}</h1><p>${range.start ? `${formatDate(range.start)} to ${formatDate(range.end)}` : 'All time'}</p><button onclick="window.print()">Save as PDF / Print</button><h2>Summary</h2><table><thead><tr><th>Person</th><th>Currency</th><th>Opening</th><th>Income</th><th>Expenses</th><th>Closing</th></tr></thead><tbody>${summaryHtml}</tbody></table><h2>Transactions</h2><table><thead><tr><th>Date</th><th>Person</th><th>Type</th><th>Category</th><th>Description</th><th>Amount</th></tr></thead><tbody>${transactionHtml}</tbody></table></body></html>`)
     reportWindow.document.close()
   }
 
   function exportBackup() {
     downloadBlob(
       new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }),
-      `fhg-funds-backup-${today()}.json`,
+      `my-fund-app-backup-${today()}.json`,
     )
   }
 

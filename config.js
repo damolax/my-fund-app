@@ -1,6 +1,4 @@
-// Local mode works with these fields left blank.
-// For cloud accounts and live read-only links, paste your Supabase project values.
-window.FHG_CONFIG = {
-  supabaseUrl: '',
-  supabasePublishableKey: ''
-}
+window.MY_FUND_CONFIG = {
+  supabaseUrl: 'https://qsnlvpwqkxqyeluafhoe.supabase.co',
+  supabasePublishableKey: 'sb_publishable_X1Oki1Ld_lxTujl7ntJRBg_X0FfamHA'
+};

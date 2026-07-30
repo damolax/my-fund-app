@@ -1,7 +1,7 @@
 {
   "workspace": {
     "id": "local-workspace",
-    "name": "FHG Funds Demo",
+    "name": "My Fund App Demo",
     "default_currency": "NGN",
     "upkeep_percentage": 20
   },
