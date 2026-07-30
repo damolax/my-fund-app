@@ -1,0 +1,25 @@
+{
+  "workspace": {
+    "id": "local-workspace",
+    "name": "FHG Funds Demo",
+    "default_currency": "NGN",
+    "upkeep_percentage": 20
+  },
+  "people": [
+    { "id": "demo-ada", "workspace_id": "local-workspace", "name": "Ada", "share_token": "7d7ae56a-4005-46a0-bf9a-6ed16ceecf10", "created_at": "2026-07-01T09:00:00Z" },
+    { "id": "demo-tomi", "workspace_id": "local-workspace", "name": "Tomi", "share_token": "70b343fa-e704-43a0-8672-f92407b8da76", "created_at": "2026-07-01T09:00:00Z" }
+  ],
+  "transactions": [
+    { "id": "tx-1", "workspace_id": "local-workspace", "person_id": "demo-ada", "type": "income", "amount": 500000, "currency": "NGN", "date": "2026-07-02", "description": "July income", "category": null, "created_at": "2026-07-02T09:00:00Z" },
+    { "id": "tx-2", "workspace_id": "local-workspace", "person_id": "demo-ada", "type": "expense", "amount": 250000, "currency": "NGN", "date": "2026-07-05", "description": "PV payment", "category": "PV", "created_at": "2026-07-05T09:00:00Z" },
+    { "id": "tx-3", "workspace_id": "local-workspace", "person_id": "demo-ada", "type": "expense", "amount": 60000, "currency": "NGN", "date": "2026-07-08", "description": "Food and transport", "category": "Upkeep", "created_at": "2026-07-08T09:00:00Z" },
+    { "id": "tx-4", "workspace_id": "local-workspace", "person_id": "demo-tomi", "type": "income", "amount": 300, "currency": "GBP", "date": "2026-07-04", "description": "July income", "category": null, "created_at": "2026-07-04T09:00:00Z" },
+    { "id": "tx-5", "workspace_id": "local-workspace", "person_id": "demo-tomi", "type": "expense", "amount": 450, "currency": "GBP", "date": "2026-07-11", "description": "Investment payment", "category": "Investment", "created_at": "2026-07-11T09:00:00Z" }
+  ],
+  "budgets": [
+    { "id": "budget-1", "workspace_id": "local-workspace", "person_id": "demo-ada", "currency": "NGN", "month": "2026-07", "pv_limit": 380000, "updated_at": "2026-07-01T09:00:00Z" }
+  ],
+  "goals": [
+    { "id": "goal-1", "workspace_id": "local-workspace", "person_id": "demo-ada", "name": "Property investment", "target_amount": 2000000, "reserved_amount": 190000, "currency": "NGN", "target_date": "2027-12-31", "status": "Active", "created_at": "2026-07-10T09:00:00Z" }
+  ]
+}
