@@ -1,100 +1,125 @@
-# My Fund App — standalone and Supabase-ready
+# My Fund App — final working build
 
-My Fund App tracks income, actual expenses, monthly PV and Upkeep limits, negative balances, borrowed funds, goals, and the total funds held for everyone.
+My Fund App tracks money held for different people using starting balances, income, actual expenses, monthly PV and Upkeep limits, negative balances, borrowed funds, goals, exports, secure viewer links, and a platform-admin overview.
 
-## Safe with Elevate Office Tracker
+## Production configuration already included
 
-This build can use the **same Supabase project** as Elevate Office Tracker. Every My Fund App database object is prefixed with `mfa_`:
+- Supabase project: `https://qsnlvpwqkxqyeluafhoe.supabase.co`
+- My Fund App URL: `https://my-fund-app-one.vercel.app/`
+- Platform administrator: `oyekunleolalekan3168@gmail.com`
 
-- `mfa_app_users`
-- `mfa_workspaces`
-- `mfa_people`
-- `mfa_transactions`
-- `mfa_monthly_budgets`
-- `mfa_goals`
-- `mfa_is_workspace_owner`
-- `mfa_touch_app_user`
-- `mfa_admin_overview`
-- `mfa_get_person_public_view`
+The browser app uses only the Supabase publishable key. Never add a `service_role` or secret key to `config.js`.
 
-Do not rename these to generic names. The prefix keeps both applications isolated while allowing them to share one Supabase project and its Auth service.
+## Shared Supabase project
 
-## Connect the existing Supabase project
+My Fund App can safely use the same Supabase project and Auth accounts as Elevate Office Tracker. Every My Fund App database object begins with `mfa_`, so the finance records stay separate from Elevate Office Tracker.
 
-1. Open the same Supabase project used by Elevate Office Tracker.
-2. Open **SQL Editor**.
-3. For a first installation, run `supabase/schema.sql`. If the earlier My Fund App schema is already installed, run only `supabase/admin-auth-upgrade.sql`.
-4. Open **Project Settings → API**.
-5. Copy the project URL and publishable/anon key.
-6. Put them in `config.js`:
+The same Supabase email and password can sign in to both apps. Browser sessions may still require a separate sign-in on each domain.
 
-```javascript
-window.MY_FUND_CONFIG = {
-  supabaseUrl: 'https://YOUR-PROJECT.supabase.co',
-  supabasePublishableKey: 'YOUR-PUBLISHABLE-OR-ANON-KEY',
-  adminEmail: 'YOUR-PLATFORM-ADMIN-EMAIL'
-}
-```
+## Required database setup
 
-Never place the Supabase `service_role` or secret key in this browser app.
+### New My Fund App installation
 
-## Authentication behavior
-
-Supabase Auth belongs to the whole Supabase project. A person who already has an Auth account in Elevate Office Tracker technically exists in the same Auth user directory. My Fund App still creates and reads only that user's own `mfa_workspaces` row through Row Level Security.
-
-Existing Elevate Office Tracker users can sign in to My Fund App with the same email address and password. Because browser sessions are stored per website/domain, they may still need to sign in again when opening My Fund App. Their Elevate data is not shown inside My Fund App.
-
-
-## Platform administrator
-
-The configured administrator is `oyekunleolalekan3168@gmail.com`.
-
-Only this signed-in email can open the **Platform admin** page or call the platform-wide database function. The restriction is enforced inside Supabase SQL, not only in the navigation.
-
-The admin page shows:
-
-- Accounts that have actually opened My Fund App
-- The people tracked by each account
-- Income and expense record counts
-- Current balances by currency
-- Positive funds, borrowed funds and net funds across all accounts
-
-It intentionally excludes unrelated Elevate Office Tracker users who have never used My Fund App.
-
-## Forgot password
-
-The sign-in screen includes **Forgot password** and show/hide password controls.
-
-In Supabase, add every deployed My Fund App address under **Authentication → URL Configuration → Redirect URLs**. Include the production URL and any local testing URL, for example:
+Run this entire file in Supabase SQL Editor:
 
 ```text
-https://YOUR-MY-FUND-APP-DOMAIN/
-http://localhost:8080/
+supabase/schema.sql
 ```
 
-Supabase sends the reset email. The user follows the link back to My Fund App and chooses a new password. Stored passwords are never visible to the app or its administrator.
+### Existing My Fund App installation
 
-## Run locally
+Run this file once in Supabase SQL Editor:
 
-Double-click `index.html`, or from this folder run:
-
-```bash
-python -m http.server 8080
+```text
+supabase/final-upgrade.sql
 ```
 
-Then open `http://localhost:8080`.
+It adds:
+
+- Editable multi-currency starting balances for every person.
+- Transactions whose exact date is unknown.
+
+It does not touch Elevate Office Tracker tables.
+
+If the platform-admin functions have never been installed, also run:
+
+```text
+supabase/admin-auth-upgrade.sql
+```
+
+## Supabase Auth URL configuration
+
+Keep the existing Site URL as:
+
+```text
+https://elevate-office-tracker.vercel.app/
+```
+
+Under Authentication → URL Configuration → Redirect URLs, include:
+
+```text
+https://elevate-office-tracker.vercel.app/**
+https://my-fund-app-one.vercel.app/**
+```
+
+The default Supabase email templates can remain unchanged.
+
+## Final financial rules
+
+- Starting balance is an opening position, not income or expense.
+- Starting balances can be positive or negative and are stored separately per currency.
+- Only Income and Expense are transactions.
+- PV is an expense category with an adjustable monthly spending limit.
+- Upkeep is an expense category with a monthly limit based on the percentage in Settings.
+- Budgets do not change balances; only recorded expenses do.
+- A person can have a negative balance, displayed as borrowed funds.
+- Workspace totals include starting balances and every positive or negative person balance.
+- Currencies remain separate and are never converted.
+
+## Bulk records
+
+The Income and Expense forms allow multiple rows to be saved together. Every row can have its own:
+
+- Amount
+- Currency
+- Date or Date unknown
+- Expense category, where applicable
+- Description
+
+An unknown-date record affects all-time balances immediately. Because no month is known, it does not count in month-specific reports or against a particular month’s PV or Upkeep limit.
+
+## Starting balances
+
+A starting balance can be entered when a person is created. It can also be added or updated later from the person dashboard for any currency.
+
+Updating it recalculates:
+
+- Person balance
+- Owner totals
+- Borrowed funds
+- Viewer dashboard
+- Admin overview
+- Reports and exports
+
+It does not create a transaction.
+
+## Authentication and administration
+
+- Sign in and create account
+- Forgot password
+- Show/hide password
+- Secure password reset
+- Platform admin restricted in the database to `oyekunleolalekan3168@gmail.com`
+- Admin view includes only accounts that actually use My Fund App
+
+Passwords are never readable by the platform administrator.
 
 ## Deploy
 
-The folder is static and can be deployed to Vercel, Netlify, or Cloudflare Pages. No build command is required.
+This is a static app. Vercel requires no build command. Push the contents of this folder to:
 
-## Core rules
+```text
+https://github.com/damolax/my-fund-app
+```
 
-- Only Income and Expense change money balances.
-- PV is an expense category with an adjustable monthly limit.
-- Upkeep is an expense category with a percentage-based monthly limit.
-- A budget/limit never changes the money held.
-- Only recorded expenses reduce balances.
-- A person's balance may be negative and is shown as borrowed funds.
-- Workspace totals include positive and negative balances.
-- Currencies remain separate and are never converted automatically.
+Vercel will redeploy from the repository.

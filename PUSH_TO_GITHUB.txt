@@ -1,0 +1,13 @@
+Run these commands in Git Bash from the extracted app folder:
+
+git add .
+git commit -m "Deploy corrected My Fund App auth and finance build"
+git branch -M main
+git remote set-url origin https://github.com/damolax/my-fund-app.git
+git push -u origin main
+
+Repository:
+https://github.com/damolax/my-fund-app
+
+Production site:
+https://my-fund-app-one.vercel.app/

@@ -1,7 +1,6 @@
 -- My Fund App database schema (safe to use beside Elevate Office Tracker)
 -- All objects are prefixed with mfa_ so they do not overlap with another app.
 -- Run this entire file once in the Supabase SQL Editor.
--- Existing installations should run supabase/final-upgrade.sql instead.
 
 create extension if not exists pgcrypto;
 
@@ -29,7 +28,6 @@ create table if not exists public.mfa_people (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references public.mfa_workspaces(id) on delete cascade,
   name text not null check (length(trim(name)) > 0),
-  starting_balances jsonb not null default '{}'::jsonb,
   share_token uuid not null default gen_random_uuid() unique,
   created_at timestamptz not null default now(),
   unique(id, workspace_id)
@@ -42,7 +40,7 @@ create table if not exists public.mfa_transactions (
   type text not null check (type in ('income', 'expense')),
   amount numeric(18,2) not null check (amount > 0),
   currency text not null,
-  date date,
+  date date not null default current_date,
   description text not null check (length(trim(description)) > 0),
   category text check (
     (type = 'income' and category is null)
@@ -133,7 +131,7 @@ set search_path = public
 as $$
 declare
   v_user_id uuid := (select auth.uid());
-  v_email text := lower(trim(coalesce(p_email, (select auth.jwt() ->> 'email'), '')));
+  v_email text := lower(trim(coalesce((select auth.jwt() ->> 'email'), '')));
 begin
   if v_user_id is null then
     raise exception 'Authentication required';

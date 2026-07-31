@@ -92,7 +92,7 @@
   }
 
   function formatDate(value) {
-    if (!value) return '—'
+    if (!value) return 'Date unknown'
     try {
       return new Intl.DateTimeFormat('en', {
         day: 'numeric',
@@ -162,7 +162,10 @@
   function normalizeCloudData(payload) {
     return {
       workspace: payload.workspace,
-      people: payload.people || [],
+      people: (payload.people || []).map((person) => ({
+        ...person,
+        starting_balances: person.starting_balances || {},
+      })),
       transactions: payload.transactions || [],
       budgets: (payload.budgets || []).map((item) => ({
         ...item,
@@ -214,14 +217,25 @@
   }
 
   function inRange(date, start, end) {
+    if (!date) return !start && !end
     const normalized = String(date).slice(0, 10)
     if (start && normalized < start) return false
     if (end && normalized > end) return false
     return true
   }
 
+  function startingBalanceFor(personOrId, currency, data = state) {
+    const person = typeof personOrId === 'string'
+      ? data.people.find((item) => item.id === personOrId)
+      : personOrId
+    return round(person?.starting_balances?.[currency] || 0)
+  }
+
   function uniqueCurrencies(personId = null, data = state) {
     const set = new Set([data.workspace?.default_currency || 'NGN'])
+    data.people
+      .filter((item) => !personId || item.id === personId)
+      .forEach((item) => Object.keys(item.starting_balances || {}).forEach((currency) => set.add(currency)))
     data.transactions
       .filter((item) => !personId || item.person_id === personId)
       .forEach((item) => set.add(item.currency))
@@ -239,15 +253,32 @@
       (item) =>
         item.person_id === personId &&
         item.currency === currency &&
-        (!throughDate || String(item.date).slice(0, 10) <= throughDate),
+        (!throughDate || !item.date || String(item.date).slice(0, 10) <= throughDate),
     )
+    const starting = startingBalanceFor(personId, currency, data)
     const income = records
       .filter((item) => item.type === 'income')
       .reduce((sum, item) => sum + num(item.amount), 0)
     const expenses = records
       .filter((item) => item.type === 'expense')
       .reduce((sum, item) => sum + num(item.amount), 0)
-    return { income: round(income), expenses: round(expenses), balance: round(income - expenses) }
+    return {
+      starting,
+      income: round(income),
+      expenses: round(expenses),
+      balance: round(starting + income - expenses),
+    }
+  }
+
+  function transactionSortValue(item) {
+    return `${item.date || '0000-00-00'}|${item.created_at || ''}`
+  }
+
+  function sortTransactions(records, descending = true) {
+    return [...records].sort((a, b) => {
+      const compared = transactionSortValue(a).localeCompare(transactionSortValue(b))
+      return descending ? -compared : compared
+    })
   }
 
   function workspacePosition(currency, data = state) {
@@ -536,14 +567,18 @@
     saveLocal()
   }
 
-  async function createPerson(name) {
-    const clean = name.trim()
+  async function createPerson(name, startingCurrency = '', startingAmount = '') {
+    const clean = String(name || '').trim()
     if (!clean) throw new Error('Enter the person’s name.')
+    const currency = String(startingCurrency || state.workspace.default_currency || 'NGN').trim().toUpperCase()
+    const hasStartingAmount = String(startingAmount ?? '').trim() !== ''
+    const startingBalances = hasStartingAmount ? { [currency]: round(startingAmount) } : {}
     if (!CLOUD_ENABLED) {
       const person = {
         id: id(),
         workspace_id: state.workspace.id,
         name: clean,
+        starting_balances: startingBalances,
         share_token: id(),
         created_at: new Date().toISOString(),
       }
@@ -552,12 +587,39 @@
     }
     const result = await db
       .from('mfa_people')
-      .insert({ workspace_id: state.workspace.id, name: clean })
+      .insert({
+        workspace_id: state.workspace.id,
+        name: clean,
+        starting_balances: startingBalances,
+      })
       .select('*')
       .single()
     if (result.error) throw result.error
     await refreshCloud()
-    return result.data
+    return { ...result.data, starting_balances: result.data.starting_balances || {} }
+  }
+
+  async function updateStartingBalance(personId, currencyValue, amountValue) {
+    const person = personById(personId)
+    if (!person) throw new Error('Person not found.')
+    const currency = String(currencyValue || state.workspace.default_currency || 'NGN').trim().toUpperCase()
+    if (!/^[A-Z]{3}$/.test(currency)) throw new Error('Enter a valid three-letter currency code.')
+    const amount = round(amountValue)
+    const startingBalances = { ...(person.starting_balances || {}), [currency]: amount }
+    if (!CLOUD_ENABLED) {
+      await mutateLocal((draft) => {
+        draft.people = draft.people.map((item) =>
+          item.id === personId ? { ...item, starting_balances: startingBalances } : item,
+        )
+      })
+      return
+    }
+    const result = await db
+      .from('mfa_people')
+      .update({ starting_balances: startingBalances })
+      .eq('id', personId)
+    if (result.error) throw result.error
+    await refreshCloud()
   }
 
   async function removePerson(personId) {
@@ -575,48 +637,84 @@
     await refreshCloud()
   }
 
-  async function addTransaction(values) {
-    const payload = {
+  function normalizeTransactionValues(values) {
+    const dateUnknown = values.date_unknown === true || values.date_unknown === 'on' || !values.date
+    return {
       id: id(),
       workspace_id: state.workspace.id,
       person_id: values.person_id,
       type: values.type,
       amount: round(values.amount),
       currency: String(values.currency || state.workspace.default_currency).trim().toUpperCase(),
-      date: values.date,
-      description: values.description.trim(),
+      date: dateUnknown ? null : values.date,
+      description: String(values.description || '').trim(),
       category: values.type === 'expense' ? values.category : null,
       created_at: new Date().toISOString(),
     }
-    if (!payload.amount || payload.amount <= 0) throw new Error('Enter an amount greater than zero.')
-    if (!payload.description) throw new Error('Enter what the income or expense is for.')
-    validateExpense(payload)
-
-    if (!CLOUD_ENABLED) {
-      await mutateLocal((draft) => draft.transactions.unshift(payload))
-      return payload
-    }
-    const result = await db.from('mfa_transactions').insert({
-      workspace_id: payload.workspace_id,
-      person_id: payload.person_id,
-      type: payload.type,
-      amount: payload.amount,
-      currency: payload.currency,
-      date: payload.date,
-      description: payload.description,
-      category: payload.category,
-    })
-    if (result.error) throw result.error
-    await refreshCloud()
-    return result.data
   }
 
-  function validateExpense(payload) {
-    if (payload.type !== 'expense') return
+  async function addTransactions(entries) {
+    const payloads = entries.map(normalizeTransactionValues)
+    if (!payloads.length) throw new Error('Add at least one record.')
+    const pending = []
+    for (const payload of payloads) {
+      if (!payload.person_id || !personById(payload.person_id)) throw new Error('Select a valid person.')
+      if (!payload.amount || payload.amount <= 0) throw new Error('Every record needs an amount greater than zero.')
+      if (!payload.description) throw new Error('Every record needs a description.')
+      if (!/^[A-Z]{3}$/.test(payload.currency)) throw new Error('Use a valid three-letter currency code.')
+      if (payload.type === 'expense' && !EXPENSE_CATEGORIES.includes(payload.category)) {
+        throw new Error('Choose a valid expense category.')
+      }
+      validateExpense(payload, pending)
+      pending.push(payload)
+    }
+
+    if (!CLOUD_ENABLED) {
+      await mutateLocal((draft) => {
+        draft.transactions.unshift(...payloads)
+      })
+      return payloads
+    }
+    const result = await db.from('mfa_transactions').insert(
+      payloads.map((payload) => ({
+        workspace_id: payload.workspace_id,
+        person_id: payload.person_id,
+        type: payload.type,
+        amount: payload.amount,
+        currency: payload.currency,
+        date: payload.date,
+        description: payload.description,
+        category: payload.category,
+      })),
+    )
+    if (result.error) throw result.error
+    await refreshCloud()
+    return result.data || payloads
+  }
+
+  async function addTransaction(values) {
+    const records = await addTransactions([values])
+    return records[0]
+  }
+
+  function validateExpense(payload, pending = []) {
+    if (payload.type !== 'expense' || !payload.date) return
     const month = String(payload.date).slice(0, 7)
+    const samePending = pending
+      .filter(
+        (item) =>
+          item.type === 'expense' &&
+          item.person_id === payload.person_id &&
+          item.currency === payload.currency &&
+          item.category === payload.category &&
+          item.date &&
+          String(item.date).slice(0, 7) === month,
+      )
+      .reduce((sum, item) => sum + num(item.amount), 0)
+
     if (payload.category === 'PV') {
       const limit = num(getBudget(payload.person_id, payload.currency, month)?.pv_limit)
-      const spent = monthlySpend(payload.person_id, payload.currency, month, 'PV')
+      const spent = monthlySpend(payload.person_id, payload.currency, month, 'PV') + samePending
       if (spent + payload.amount > limit + 0.00001) {
         throw new Error(
           `This PV expense exceeds the remaining monthly limit by ${money(
@@ -630,7 +728,7 @@
       const limit =
         monthlyIncome(payload.person_id, payload.currency, month) *
         (num(state.workspace.upkeep_percentage) / 100)
-      const spent = monthlySpend(payload.person_id, payload.currency, month, 'Upkeep')
+      const spent = monthlySpend(payload.person_id, payload.currency, month, 'Upkeep') + samePending
       if (spent + payload.amount > limit + 0.00001) {
         throw new Error(
           `This Upkeep expense exceeds the remaining monthly limit by ${money(
@@ -855,9 +953,7 @@
       })
       .join('')
 
-    const recent = [...state.transactions]
-      .sort((a, b) => `${b.date}${b.created_at || ''}`.localeCompare(`${a.date}${a.created_at || ''}`))
-      .slice(0, 8)
+    const recent = sortTransactions(state.transactions, true).slice(0, 8)
 
     content += `
       <section class="dashboard-two-col">
@@ -904,8 +1000,13 @@
         <form class="panel add-person-card" id="add-person-form">
           <div class="section-icon">＋</div>
           <h2>Add a person</h2>
-          <p>No email, phone number or opening balance is required.</p>
+          <p>Only the name is required. A starting balance is optional and can be updated later.</p>
           <label class="field"><span>Name</span><input name="name" placeholder="Person's full name" required></label>
+          <div class="two-fields">
+            <label class="field"><span>Starting balance (optional)</span><input name="starting_balance" type="number" step="0.01" placeholder="0.00"></label>
+            <label class="field"><span>Currency</span><input name="starting_currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(state.workspace.default_currency)}">${currencyDatalist()}</label>
+          </div>
+          <div class="helper-text">Use a negative starting balance when the person already owes money.</div>
           <button class="primary-button full-width" ${busy ? 'disabled' : ''}><span>＋</span>Add person</button>
         </form>
         <div class="panel people-panel">
@@ -934,9 +1035,10 @@
     const monthIncome = monthlyIncome(person.id, currency, month)
     const upkeepLimit = round(monthIncome * (num(state.workspace.upkeep_percentage) / 100))
     const upkeepSpent = monthlySpend(person.id, currency, month, 'Upkeep')
-    const records = state.transactions
-      .filter((item) => item.person_id === person.id && item.currency === currency)
-      .sort((a, b) => `${b.date}${b.created_at || ''}`.localeCompare(`${a.date}${a.created_at || ''}`))
+    const records = sortTransactions(
+      state.transactions.filter((item) => item.person_id === person.id && item.currency === currency),
+      true,
+    )
     const goals = state.goals.filter(
       (goal) => goal.person_id === person.id && goal.currency === currency,
     )
@@ -951,14 +1053,15 @@
         'Person dashboard',
         person.name,
         'Add income or actual expenses. Monthly limits control spending but never change the money balance.',
-        `<div class="button-row"><button class="secondary-button" data-action="open-expense" data-person-id="${person.id}">↗ Add expense</button><button class="primary-button" data-action="open-income" data-person-id="${person.id}">↘ Add income</button></div>`,
+        `<div class="button-row"><button class="secondary-button" data-action="edit-starting-balance" data-person-id="${person.id}" data-currency="${currency}">▣ Starting balance</button><button class="secondary-button" data-action="open-expense" data-person-id="${person.id}">↗ Add expense</button><button class="primary-button" data-action="open-income" data-person-id="${person.id}">↘ Add income</button></div>`,
       )}
       <div class="toolbar-row">
         <label class="field inline-field"><span>Currency</span><select data-ui="personCurrency" data-person-id="${person.id}">${currencySelect}</select></label>
         <label class="field inline-field"><span>Budget month</span><input type="month" data-ui="personMonth" data-person-id="${person.id}" value="${month}"></label>
       </div>
-      <section class="summary-card-grid">
-        ${summaryCard('Current balance', money(position.balance, currency), '▣', position.balance < 0 ? `Borrowed funds in use: ${money(Math.abs(position.balance), currency)}` : 'Income minus actual expenses', position.balance < 0)}
+      <section class="summary-card-grid four">
+        ${summaryCard('Current balance', money(position.balance, currency), '▣', position.balance < 0 ? `Borrowed funds in use: ${money(Math.abs(position.balance), currency)}` : 'Starting balance + income − expenses', position.balance < 0)}
+        ${summaryCard('Starting balance', money(position.starting, currency), '◫', 'Editable without creating a transaction', position.starting < 0)}
         ${summaryCard('Total income', money(position.income, currency), '↘')}
         ${summaryCard('Total expenses', money(position.expenses, currency), '↗')}
       </section>
@@ -1061,12 +1164,14 @@
       ui.transactionStart,
       ui.transactionEnd,
     )
-    const filtered = state.transactions
-      .filter((item) => ui.transactionPerson === 'all' || item.person_id === ui.transactionPerson)
-      .filter((item) => ui.transactionType === 'all' || item.type === ui.transactionType)
-      .filter((item) => ui.transactionCurrency === 'all' || item.currency === ui.transactionCurrency)
-      .filter((item) => inRange(item.date, range.start, range.end))
-      .sort((a, b) => `${b.date}${b.created_at || ''}`.localeCompare(`${a.date}${a.created_at || ''}`))
+    const filtered = sortTransactions(
+      state.transactions
+        .filter((item) => ui.transactionPerson === 'all' || item.person_id === ui.transactionPerson)
+        .filter((item) => ui.transactionType === 'all' || item.type === ui.transactionType)
+        .filter((item) => ui.transactionCurrency === 'all' || item.currency === ui.transactionCurrency)
+        .filter((item) => inRange(item.date, range.start, range.end)),
+      true,
+    )
 
     const peopleOptions = [
       '<option value="all">All people</option>',
@@ -1098,24 +1203,27 @@
   function reportRows(personId, currency, start, end) {
     const people = state.people.filter((person) => personId === 'all' || person.id === personId)
     const currencies = currency === 'all' ? uniqueCurrencies() : [currency]
-    const transactions = state.transactions
-      .filter((item) => people.some((person) => person.id === item.person_id))
-      .filter((item) => currency === 'all' || item.currency === currency)
-      .filter((item) => inRange(item.date, start, end))
-      .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-      .map((item) => ({
-        ...item,
-        person_name: personById(item.person_id)?.name || 'Unknown',
-      }))
+    const transactions = sortTransactions(
+      state.transactions
+        .filter((item) => people.some((person) => person.id === item.person_id))
+        .filter((item) => currency === 'all' || item.currency === currency)
+        .filter((item) => inRange(item.date, start, end)),
+      false,
+    ).map((item) => ({
+      ...item,
+      person_name: personById(item.person_id)?.name || 'Unknown',
+    }))
 
     const summary = []
     for (const person of people) {
       for (const curr of currencies) {
+        const starting = startingBalanceFor(person, curr)
         const before = state.transactions.filter(
           (item) =>
             item.person_id === person.id &&
             item.currency === curr &&
             start &&
+            item.date &&
             String(item.date).slice(0, 10) < start,
         )
         const period = state.transactions.filter(
@@ -1124,24 +1232,26 @@
             item.currency === curr &&
             inRange(item.date, start, end),
         )
-        const opening = start
+        const beforeMovement = start
           ? before.reduce(
               (sum, item) => sum + (item.type === 'income' ? num(item.amount) : -num(item.amount)),
               0,
             )
           : 0
+        const opening = round(starting + beforeMovement)
         const income = period
           .filter((item) => item.type === 'income')
           .reduce((sum, item) => sum + num(item.amount), 0)
         const expenses = period
           .filter((item) => item.type === 'expense')
           .reduce((sum, item) => sum + num(item.amount), 0)
-        if (opening || income || expenses) {
+        if (starting || opening || income || expenses) {
           summary.push({
             person_id: person.id,
             person_name: person.name,
             currency: curr,
-            opening: round(opening),
+            starting: round(starting),
+            opening,
             income: round(income),
             expenses: round(expenses),
             closing: round(opening + income - expenses),
@@ -1189,9 +1299,9 @@
               : ''
           }
           <div class="export-buttons">
-            <button class="primary-button" data-action="export-pdf" ${rows.transactions.length ? '' : 'disabled'}>⇩ PDF</button>
-            <button class="secondary-button" data-action="export-xlsx" ${rows.transactions.length ? '' : 'disabled'}>▦ Excel</button>
-            <button class="secondary-button" data-action="export-csv" ${rows.transactions.length ? '' : 'disabled'}>≡ CSV</button>
+            <button class="primary-button" data-action="export-pdf" ${rows.transactions.length || rows.summary.length ? '' : 'disabled'}>⇩ PDF</button>
+            <button class="secondary-button" data-action="export-xlsx" ${rows.transactions.length || rows.summary.length ? '' : 'disabled'}>▦ Excel</button>
+            <button class="secondary-button" data-action="export-csv" ${rows.transactions.length || rows.summary.length ? '' : 'disabled'}>≡ CSV</button>
           </div>
         </div>
         <div class="panel report-preview">
@@ -1203,6 +1313,8 @@
   }
 
   function adminBalanceForPerson(personId, currency, payload = adminState) {
+    const person = (payload?.people || []).find((item) => item.id === personId)
+    const starting = round(person?.starting_balances?.[currency] || 0)
     const records = (payload?.transactions || []).filter(
       (item) => item.person_id === personId && item.currency === currency,
     )
@@ -1212,12 +1324,22 @@
     const expenses = records
       .filter((item) => item.type === 'expense')
       .reduce((sum, item) => sum + num(item.amount), 0)
-    return { income: round(income), expenses: round(expenses), balance: round(income - expenses) }
+    return {
+      starting,
+      income: round(income),
+      expenses: round(expenses),
+      balance: round(starting + income - expenses),
+    }
   }
 
   function adminCurrenciesForPeople(people, payload = adminState) {
     const ids = new Set(people.map((person) => person.id))
-    return [...new Set((payload?.transactions || []).filter((item) => ids.has(item.person_id)).map((item) => item.currency))]
+    const set = new Set()
+    people.forEach((person) => Object.keys(person.starting_balances || {}).forEach((currency) => set.add(currency)))
+    ;(payload?.transactions || [])
+      .filter((item) => ids.has(item.person_id))
+      .forEach((item) => set.add(item.currency))
+    return [...set]
   }
 
   function formatTimestamp(value) {
@@ -1249,7 +1371,7 @@
     const workspaces = payload.workspaces || []
     const people = payload.people || []
     const transactions = payload.transactions || []
-    const currencies = [...new Set(transactions.map((item) => item.currency))]
+    const currencies = adminCurrenciesForPeople(people, payload)
 
     const fundCards = currencies.length
       ? currencies.map((currency) => {
@@ -1258,7 +1380,7 @@
           const borrowed = round(positions.reduce((sum, item) => sum + Math.abs(Math.min(item.balance, 0)), 0))
           return `<article class="admin-fund-card"><span>${currency}</span><strong>${money(positive - borrowed, currency)}</strong><small>${money(positive, currency)} positive · ${money(borrowed, currency)} borrowed</small></article>`
         }).join('')
-      : '<div class="empty-inline">No transactions have been recorded yet.</div>'
+      : '<div class="empty-inline">No starting balances or transactions have been recorded yet.</div>'
 
     const accountPanels = users.length
       ? users.map((user) => {
@@ -1273,11 +1395,15 @@
           }).join('') || '<span class="muted-text">No funds recorded</span>'
           const rows = accountPeople.length
             ? accountPeople.map((person) => {
-                const pc = [...new Set(accountTransactions.filter((item) => item.person_id === person.id).map((item) => item.currency))]
+                const pcSet = new Set(Object.keys(person.starting_balances || {}))
+                accountTransactions
+                  .filter((item) => item.person_id === person.id)
+                  .forEach((item) => pcSet.add(item.currency))
+                const pc = [...pcSet]
                 const balances = pc.map((currency) => {
                   const position = adminBalanceForPerson(person.id, currency, payload)
                   return `<span class="balance-pill ${position.balance < 0 ? 'negative-pill' : ''}">${money(position.balance, currency)}</span>`
-                }).join('') || '<span class="muted-text">No records</span>'
+                }).join('') || '<span class="muted-text">No balance yet</span>'
                 return `<tr><td><strong>${escapeHtml(person.name)}</strong></td><td>${balances}</td><td>${accountTransactions.filter((item) => item.person_id === person.id).length}</td><td>${formatTimestamp(person.created_at)}</td></tr>`
               }).join('')
             : '<tr><td colspan="4" class="empty-cell">This account has not added anyone yet.</td></tr>'
@@ -1484,29 +1610,30 @@
   }
 
   function renderViewer(payload) {
+    const person = { ...payload.person, starting_balances: payload.person.starting_balances || {} }
     const data = {
       workspace: payload.workspace,
-      people: [payload.person],
+      people: [person],
       transactions: payload.transactions,
       budgets: payload.budgets,
       goals: payload.goals,
     }
-    const currencies = uniqueCurrencies(payload.person.id, data)
+    const currencies = uniqueCurrencies(person.id, data)
     const sections = currencies
       .map((currency) => {
-        const position = personPosition(payload.person.id, currency, '', data)
+        const position = personPosition(person.id, currency, '', data)
         const month = currentMonth()
-        const pvLimit = num(getBudget(payload.person.id, currency, month, data)?.pv_limit)
-        const pvSpent = monthlySpend(payload.person.id, currency, month, 'PV', data)
+        const pvLimit = num(getBudget(person.id, currency, month, data)?.pv_limit)
+        const pvSpent = monthlySpend(person.id, currency, month, 'PV', data)
         const upkeepLimit = round(
-          monthlyIncome(payload.person.id, currency, month, data) *
+          monthlyIncome(person.id, currency, month, data) *
             (num(payload.workspace.upkeep_percentage) / 100),
         )
-        const upkeepSpent = monthlySpend(payload.person.id, currency, month, 'Upkeep', data)
-        const records = payload.transactions
-          .filter((item) => item.currency === currency)
-          .sort((a, b) => String(b.date).localeCompare(String(a.date)))
-          .slice(0, 25)
+        const upkeepSpent = monthlySpend(person.id, currency, month, 'Upkeep', data)
+        const records = sortTransactions(
+          payload.transactions.filter((item) => item.currency === currency),
+          true,
+        ).slice(0, 25)
         const goals = payload.goals.filter((goal) => goal.currency === currency)
         return `
           <section class="viewer-currency-section">
@@ -1515,19 +1642,20 @@
               <strong class="${position.balance < 0 ? 'negative-text' : ''}">${money(position.balance, currency)}</strong>
               <span>${position.balance < 0 ? `Borrowed funds in use: ${money(Math.abs(position.balance), currency)}` : 'Current balance'}</span>
             </div>
-            <div class="summary-card-grid viewer-summary">
+            <div class="summary-card-grid four viewer-summary">
+              ${summaryCard('Starting balance', money(position.starting, currency), '◫', 'Opening position', position.starting < 0)}
               ${summaryCard('Income', money(position.income, currency), '↘')}
               ${summaryCard('Expenses', money(position.expenses, currency), '↗')}
               ${summaryCard('Balance', money(position.balance, currency), '▣', position.balance < 0 ? 'This amount is currently borrowed.' : '', position.balance < 0)}
             </div>
             <div class="budget-grid viewer-budgets">
-              ${budgetCard('PV limit this month', 'PV', pvLimit, pvSpent, currency, payload.person.id, month, false, 'Only actual PV expenses reduce the balance.')}
-              ${budgetCard('Upkeep limit this month', 'U', upkeepLimit, upkeepSpent, currency, payload.person.id, month, false, `${payload.workspace.upkeep_percentage}% of this month’s recorded income.`)}
+              ${budgetCard('PV limit this month', 'PV', pvLimit, pvSpent, currency, person.id, month, false, 'Only actual PV expenses reduce the balance.')}
+              ${budgetCard('Upkeep limit this month', 'U', upkeepLimit, upkeepSpent, currency, person.id, month, false, `${payload.workspace.upkeep_percentage}% of this month’s recorded income.`)}
               ${viewerGoalSummary(goals, position.balance, currency)}
             </div>
             <div class="panel">
               ${panelHeading('Recent records', `${records.length} shown`)}
-              ${transactionListForViewer(records, payload.person)}
+              ${transactionListForViewer(records, person)}
             </div>
           </section>`
       })
@@ -1540,7 +1668,7 @@
           <div><div class="live-badge"><span class="status-dot"></span>Updated automatically</div><div class="viewer-refresh">Checks every 5 seconds</div></div>
         </header>
         <main class="viewer-main">
-          ${pageHeader('Your records', payload.person.name, 'Income, actual expenses, monthly limits and current balances. A minus balance means borrowed funds are currently in use.')}
+          ${pageHeader('Your records', person.name, 'Income, actual expenses, monthly limits and current balances. A minus balance means borrowed funds are currently in use.')}
           <div class="viewer-currencies">${sections}</div>
         </main>
       </div>`
@@ -1600,7 +1728,7 @@
     document.getElementById('app').innerHTML = html
   }
 
-  function openModal(title, body) {
+  function openModal(title, body, wide = false) {
     let root = document.getElementById('modal-root')
     if (!root) {
       root = document.createElement('div')
@@ -1609,7 +1737,7 @@
     }
     root.innerHTML = `
       <div class="modal-backdrop" data-action="modal-backdrop">
-        <div class="modal">
+        <div class="modal ${wide ? 'wide' : ''}">
           <div class="modal-head"><h2>${escapeHtml(title)}</h2><button class="icon-button" data-action="close-modal">×</button></div>
           ${body}
         </div>
@@ -1621,36 +1749,97 @@
     if (root) root.innerHTML = ''
   }
 
+  function transactionRowTemplate(type, currency, index = 0) {
+    const categoryField =
+      type === 'expense'
+        ? `<label class="field"><span>Category</span><select data-field="category">${EXPENSE_CATEGORIES.map((item) => `<option value="${item}">${item}</option>`).join('')}</select></label>`
+        : ''
+    return `
+      <div class="bulk-entry-row" data-entry-index="${index}">
+        <div class="bulk-entry-head">
+          <strong>${type === 'income' ? 'Income' : 'Expense'} ${index + 1}</strong>
+          <button type="button" class="icon-button mini" data-action="remove-transaction-row" title="Remove row">×</button>
+        </div>
+        <div class="bulk-entry-grid">
+          <label class="field"><span>Amount</span><input data-field="amount" type="number" min="0.01" step="0.01" required></label>
+          <label class="field"><span>Currency</span><input data-field="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(currency)}" required></label>
+          <label class="field"><span>Date</span><input data-field="date" type="date" value="${today()}"></label>
+          ${categoryField}
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" data-action="toggle-unknown-date" data-field="date_unknown">
+          <span>Date unknown or not remembered</span>
+        </label>
+        <label class="field"><span>${type === 'income' ? 'Income source or description' : 'What is this expense for?'}</span><input data-field="description" placeholder="${type === 'income' ? 'e.g. Monthly earnings' : 'e.g. PV order, food or investment'}" required></label>
+      </div>`
+  }
+
+  function renumberTransactionRows() {
+    document.querySelectorAll('#bulk-transaction-rows .bulk-entry-row').forEach((row, index) => {
+      row.dataset.entryIndex = String(index)
+      const heading = row.querySelector('.bulk-entry-head strong')
+      const type = document.querySelector('#transaction-form input[name="type"]')?.value || 'income'
+      if (heading) heading.textContent = `${type === 'income' ? 'Income' : 'Expense'} ${index + 1}`
+      const remove = row.querySelector('[data-action="remove-transaction-row"]')
+      if (remove) remove.hidden = document.querySelectorAll('#bulk-transaction-rows .bulk-entry-row').length === 1
+    })
+  }
+
+  function transactionEntriesFromForm(form) {
+    const personId = form.querySelector('input[name="person_id"]')?.value
+    const type = form.querySelector('input[name="type"]')?.value
+    return [...form.querySelectorAll('.bulk-entry-row')].map((row) => ({
+      person_id: personId,
+      type,
+      amount: row.querySelector('[data-field="amount"]')?.value,
+      currency: row.querySelector('[data-field="currency"]')?.value,
+      date: row.querySelector('[data-field="date"]')?.value,
+      date_unknown: row.querySelector('[data-field="date_unknown"]')?.checked,
+      category: type === 'expense' ? row.querySelector('[data-field="category"]')?.value : null,
+      description: row.querySelector('[data-field="description"]')?.value,
+    }))
+  }
+
   function openTransactionModal(personId, type) {
     const person = personById(personId)
     if (!person) return
     const currency = ui.personCurrency[personId] || uniqueCurrencies(personId)[0] || state.workspace.default_currency
     const body = `
-      <form class="modal-form" id="transaction-form">
+      <form class="modal-form bulk-transaction-form" id="transaction-form">
         <input type="hidden" name="person_id" value="${person.id}">
         <input type="hidden" name="type" value="${type}">
-        <div class="two-fields">
-          <label class="field"><span>Amount</span><input name="amount" type="number" min="0.01" step="0.01" required autofocus></label>
-          <label class="field"><span>Currency code</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(currency)}" required>${currencyDatalist()}</label>
-        </div>
-        <label class="field"><span>Date</span><input name="date" type="date" value="${today()}" required></label>
-        ${
-          type === 'expense'
-            ? `<label class="field"><span>Expense category</span><select name="category">${EXPENSE_CATEGORIES.map((item) => `<option value="${item}">${item}</option>`).join('')}</select></label>`
-            : ''
-        }
-        <label class="field"><span>${type === 'income' ? 'Income source or description' : 'What is this expense for?'}</span><input name="description" placeholder="${type === 'income' ? 'e.g. Monthly earnings' : 'e.g. PV order, food or investment'}" required></label>
+        ${currencyDatalist()}
+        <div id="bulk-transaction-rows">${transactionRowTemplate(type, currency, 0)}</div>
+        <button type="button" class="secondary-button add-row-button" data-action="add-transaction-row" data-type="${type}" data-currency="${escapeHtml(currency)}">＋ Add another ${type}</button>
         <div class="notice ${type === 'expense' ? 'warn' : ''}">
           ${
             type === 'expense'
-              ? 'This expense may make the person’s overall balance negative. PV and Upkeep expenses still cannot exceed their monthly category limits.'
-              : 'Income increases the person’s balance and automatically reduces any existing negative balance.'
+              ? 'Expenses may make the person’s overall balance negative. Records with an unknown date affect the balance but are not counted against a particular month’s PV or Upkeep limit.'
+              : 'Income increases the person’s balance. Records with an unknown date appear in all-time totals but not in month-based reports.'
           }
         </div>
         <div id="transaction-error"></div>
-        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">${type === 'income' ? '↘ Save income' : '↗ Save expense'}</button></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">${type === 'income' ? '↘ Save income records' : '↗ Save expense records'}</button></div>
       </form>`
-    openModal(`${type === 'income' ? 'Add income for' : 'Add expense for'} ${person.name}`, body)
+    openModal(`${type === 'income' ? 'Add income for' : 'Add expense for'} ${person.name}`, body, true)
+    renumberTransactionRows()
+  }
+
+  function openStartingBalanceModal(personId, currency) {
+    const person = personById(personId)
+    if (!person) return
+    const selectedCurrency = currency || state.workspace.default_currency
+    const current = startingBalanceFor(person, selectedCurrency)
+    const body = `
+      <form class="modal-form" id="starting-balance-form">
+        <input type="hidden" name="person_id" value="${person.id}">
+        <label class="field"><span>Currency code</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(selectedCurrency)}" required>${currencyDatalist()}</label>
+        <label class="field"><span>Starting balance</span><input name="amount" type="number" step="0.01" value="${current}" required autofocus></label>
+        <div class="notice">This is the person’s balance before recorded income and expenses. Updating it recalculates all balances but does not create a transaction. Negative values are allowed.</div>
+        <div id="starting-balance-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">✓ Save starting balance</button></div>
+      </form>`
+    openModal(`Starting balance for ${person.name}`, body)
   }
 
   function openBudgetModal(personId, currency, month, current) {
@@ -1750,8 +1939,17 @@
     const rows = reportRows(ui.reportPerson, ui.reportCurrency, range.start, range.end)
     const values = [
       ['Date', 'Person', 'Type', 'Category', 'Description', 'Amount', 'Currency'],
+      ...rows.summary.map((item) => [
+        '',
+        item.person_name,
+        'starting_balance',
+        '',
+        'Starting balance',
+        item.starting,
+        item.currency,
+      ]),
       ...rows.transactions.map((item) => [
-        String(item.date).slice(0, 10),
+        item.date ? String(item.date).slice(0, 10) : 'Date unknown',
         item.person_name,
         item.type,
         item.category || '',
@@ -1783,6 +1981,7 @@
       rows.summary.map((item) => ({
         Person: item.person_name,
         Currency: item.currency,
+        StartingBalance: item.starting,
         Opening: item.opening,
         Income: item.income,
         Expenses: item.expenses,
@@ -1791,7 +1990,7 @@
     )
     const transactionSheet = window.XLSX.utils.json_to_sheet(
       rows.transactions.map((item) => ({
-        Date: String(item.date).slice(0, 10),
+        Date: item.date ? String(item.date).slice(0, 10) : 'Date unknown',
         Person: item.person_name,
         Type: item.type,
         Category: item.category || '',
@@ -1827,10 +2026,11 @@
       if (typeof doc.autoTable === 'function') {
         doc.autoTable({
           startY: 30,
-          head: [['Person', 'Currency', 'Opening', 'Income', 'Expenses', 'Closing']],
+          head: [['Person', 'Currency', 'Starting', 'Opening', 'Income', 'Expenses', 'Closing']],
           body: rows.summary.map((item) => [
             item.person_name,
             item.currency,
+            money(item.starting, item.currency),
             money(item.opening, item.currency),
             money(item.income, item.currency),
             money(item.expenses, item.currency),
@@ -1876,7 +2076,7 @@
     }
     const summaryHtml = rows.summary
       .map(
-        (item) => `<tr><td>${escapeHtml(item.person_name)}</td><td>${item.currency}</td><td>${money(item.opening, item.currency)}</td><td>${money(item.income, item.currency)}</td><td>${money(item.expenses, item.currency)}</td><td>${money(item.closing, item.currency)}</td></tr>`,
+        (item) => `<tr><td>${escapeHtml(item.person_name)}</td><td>${item.currency}</td><td>${money(item.starting, item.currency)}</td><td>${money(item.opening, item.currency)}</td><td>${money(item.income, item.currency)}</td><td>${money(item.expenses, item.currency)}</td><td>${money(item.closing, item.currency)}</td></tr>`,
       )
       .join('')
     const transactionHtml = rows.transactions
@@ -1884,7 +2084,7 @@
         (item) => `<tr><td>${formatDate(item.date)}</td><td>${escapeHtml(item.person_name)}</td><td>${escapeHtml(item.type)}</td><td>${escapeHtml(item.category || '')}</td><td>${escapeHtml(item.description)}</td><td>${money(item.amount, item.currency)}</td></tr>`,
       )
       .join('')
-    reportWindow.document.write(`<!doctype html><html><head><title>My Fund App Report</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#15221d}h1{margin-bottom:4px}p{color:#68756f}table{width:100%;border-collapse:collapse;margin:18px 0;font-size:11px}th,td{border:1px solid #dfe5e1;padding:7px;text-align:left}th{background:#14251f;color:white}@media print{button{display:none}}</style></head><body><h1>${escapeHtml(state.workspace.name)}</h1><p>${range.start ? `${formatDate(range.start)} to ${formatDate(range.end)}` : 'All time'}</p><button onclick="window.print()">Save as PDF / Print</button><h2>Summary</h2><table><thead><tr><th>Person</th><th>Currency</th><th>Opening</th><th>Income</th><th>Expenses</th><th>Closing</th></tr></thead><tbody>${summaryHtml}</tbody></table><h2>Transactions</h2><table><thead><tr><th>Date</th><th>Person</th><th>Type</th><th>Category</th><th>Description</th><th>Amount</th></tr></thead><tbody>${transactionHtml}</tbody></table></body></html>`)
+    reportWindow.document.write(`<!doctype html><html><head><title>My Fund App Report</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#15221d}h1{margin-bottom:4px}p{color:#68756f}table{width:100%;border-collapse:collapse;margin:18px 0;font-size:11px}th,td{border:1px solid #dfe5e1;padding:7px;text-align:left}th{background:#14251f;color:white}@media print{button{display:none}}</style></head><body><h1>${escapeHtml(state.workspace.name)}</h1><p>${range.start ? `${formatDate(range.start)} to ${formatDate(range.end)}` : 'All time'}</p><button onclick="window.print()">Save as PDF / Print</button><h2>Summary</h2><table><thead><tr><th>Person</th><th>Currency</th><th>Starting</th><th>Opening</th><th>Income</th><th>Expenses</th><th>Closing</th></tr></thead><tbody>${summaryHtml}</tbody></table><h2>Transactions</h2><table><thead><tr><th>Date</th><th>Person</th><th>Type</th><th>Category</th><th>Description</th><th>Amount</th></tr></thead><tbody>${transactionHtml}</tbody></table></body></html>`)
     reportWindow.document.close()
   }
 
@@ -1914,7 +2114,11 @@
       busy = true
       try {
         const values = new FormData(form)
-        const person = await createPerson(values.get('name') || '')
+        const person = await createPerson(
+          values.get('name') || '',
+          values.get('starting_currency') || state.workspace.default_currency,
+          values.get('starting_balance'),
+        )
         go(`/person/${person.id}`)
       } catch (error) {
         toast(error.message, 'danger')
@@ -1930,11 +2134,31 @@
       busy = true
       const errorBox = document.getElementById('transaction-error')
       try {
-        const values = Object.fromEntries(new FormData(form).entries())
-        await addTransaction(values)
+        const entries = transactionEntriesFromForm(form)
+        await addTransactions(entries)
         closeModal()
         render()
-        toast(`${values.type === 'income' ? 'Income' : 'Expense'} saved.`)
+        toast(`${entries.length} ${entries[0]?.type === 'income' ? 'income' : 'expense'} record${entries.length === 1 ? '' : 's'} saved.`)
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message)}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
+
+    if (form.id === 'starting-balance-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('starting-balance-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        await updateStartingBalance(values.person_id, values.currency, values.amount)
+        ui.personCurrency[values.person_id] = String(values.currency).trim().toUpperCase()
+        closeModal()
+        render()
+        toast('Starting balance updated.')
       } catch (error) {
         if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message)}</div>`
       } finally {
@@ -2004,7 +2228,7 @@
       busy = true
       const values = Object.fromEntries(new FormData(form).entries())
       try {
-        const redirectTo = `${location.origin}${location.pathname}`
+        const redirectTo = CONFIG.appUrl || `${location.origin}${location.pathname}`
         const result = await db.auth.resetPasswordForEmail(values.email, { redirectTo })
         if (result.error) throw result.error
         renderForgotPassword('Reset link sent. Check your inbox and spam folder.', values.email)
@@ -2055,7 +2279,10 @@
             : await db.auth.signUp({
                 email: values.email,
                 password: values.password,
-                options: { data: { app_name: 'my_fund_app' } },
+                options: {
+                  emailRedirectTo: CONFIG.appUrl || `${location.origin}${location.pathname}`,
+                  data: { app_name: 'my_fund_app' },
+                },
               })
         if (result.error) throw result.error
         if (mode === 'signup' && !result.data.session) {
@@ -2106,6 +2333,41 @@
       } finally {
         adminLoading = false
       }
+      return
+    }
+
+    if (action === 'add-transaction-row') {
+      const container = document.getElementById('bulk-transaction-rows')
+      if (!container) return
+      const index = container.querySelectorAll('.bulk-entry-row').length
+      container.insertAdjacentHTML(
+        'beforeend',
+        transactionRowTemplate(target.dataset.type || 'income', target.dataset.currency || state.workspace.default_currency, index),
+      )
+      renumberTransactionRows()
+      container.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      return
+    }
+    if (action === 'remove-transaction-row') {
+      const row = target.closest('.bulk-entry-row')
+      const container = document.getElementById('bulk-transaction-rows')
+      if (!row || !container || container.querySelectorAll('.bulk-entry-row').length <= 1) return
+      row.remove()
+      renumberTransactionRows()
+      return
+    }
+    if (action === 'toggle-unknown-date') {
+      const row = target.closest('.bulk-entry-row')
+      const dateInput = row?.querySelector('[data-field="date"]')
+      if (dateInput) {
+        dateInput.disabled = target.checked
+        if (target.checked) dateInput.value = ''
+        else if (!dateInput.value) dateInput.value = today()
+      }
+      return
+    }
+    if (action === 'edit-starting-balance') {
+      openStartingBalanceModal(target.dataset.personId, target.dataset.currency)
       return
     }
 
