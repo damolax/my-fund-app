@@ -269,6 +269,23 @@
     }
   }
 
+  async function triggerLedgerEmail(transactionId, changeType) {
+    if (!transactionId || !changeType || !db?.auth) return
+    try {
+      const token = (await db.auth.getJWTToken?.()) || session?.access_token || null
+      if (!token) return
+      await fetch('/api/person-ledger-email', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ transaction_id: transactionId, change_type: changeType }),
+      })
+    } catch {
+      // The database outbox keeps the notification queued if immediate delivery fails.
+    }
+  }
   async function submitContributorRequest(values) {
     const result = await db.rpc('mfa_submit_record_request', {
       p_person_id: values.person_id,
@@ -316,6 +333,9 @@
       p_note: note || null,
     })
     if (result.error) throw result.error
+    if (decision === 'approve' && result.data?.recorded_transaction_id) {
+      await triggerLedgerEmail(result.data.recorded_transaction_id, 'created')
+    }
     await refreshCloud()
     return result.data
   }
