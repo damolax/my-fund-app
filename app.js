@@ -3,8 +3,13 @@
 
   const STORAGE_KEY = 'my-fund-app-v1'
   const CONFIG = window.MY_FUND_CONFIG || {}
-  const CLOUD_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
-  const db = CLOUD_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
+  const CLOUD_CONFIGURED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && CONFIG.neonDataApiUrl)
+  const AUTH_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
+  const DATA_ENABLED = Boolean(CONFIG.neonDataApiUrl && window.createNeonDataClient)
+  const CLOUD_ENABLED = CLOUD_CONFIGURED && AUTH_ENABLED && DATA_ENABLED
+  const CLOUD_UNAVAILABLE = CLOUD_CONFIGURED && !CLOUD_ENABLED
+  const authDb = AUTH_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
+  const db = DATA_ENABLED ? window.createNeonDataClient(CONFIG.neonDataApiUrl, () => session?.access_token || null) : null
   const ADMIN_EMAIL = String(CONFIG.adminEmail || 'oyekunleolalekan3168@gmail.com').trim().toLowerCase()
 
   const DEFAULT_DATA = {
@@ -157,6 +162,18 @@
     adminState = result.data || { users: [], workspaces: [], people: [], transactions: [], budgets: [], goals: [] }
     adminError = ''
     return adminState
+  }
+
+  async function migrateSupabaseSnapshotToNeon() {
+    if (!isPlatformAdmin()) throw new Error('Platform admin access is restricted.')
+    if (!authDb) throw new Error('Supabase authentication is unavailable.')
+    const source = await authDb.rpc('mfa_admin_overview')
+    if (source.error) throw source.error
+    const imported = await db.rpc('mfa_import_supabase_snapshot', { p_payload: source.data })
+    if (imported.error) throw imported.error
+    await refreshCloud()
+    await refreshAdmin()
+    return imported.data || {}
   }
 
   function normalizeCloudData(payload) {
@@ -453,9 +470,11 @@
             <button class="icon-button" data-action="refresh" title="Refresh">↻</button>
           </header>
           ${
-            !CLOUD_ENABLED
-              ? '<div class="local-banner"><span>◈</span><span>This app works immediately in local mode. Add Supabase keys in config.js for accounts, cross-device data and live secure links.</span></div>'
-              : ''
+            CLOUD_UNAVAILABLE
+              ? '<div class="local-banner"><span>!</span><span>Cloud services are configured but unavailable. No finance data will be saved locally until the cloud connection is restored.</span></div>'
+              : !CLOUD_CONFIGURED
+                ? '<div class="local-banner"><span>◈</span><span>Local development mode is active because no cloud configuration is present.</span></div>'
+                : ''
           }
           <div id="toast"></div>
           <div class="page-wrap">${content}</div>
@@ -521,45 +540,17 @@
 
   function subscribeRealtime() {
     if (!CLOUD_ENABLED || !state.workspace?.id || state.workspace.id === 'local-workspace') return
-    if (realtimeChannel) db.removeChannel(realtimeChannel)
-    const reload = async () => {
-      await refreshCloud()
-      const route = getRoute()
-      if (!route.path.startsWith('/view/')) render()
-    }
-    realtimeChannel = db
-      .channel(`mfa-${state.workspace.id}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'mfa_people', filter: `workspace_id=eq.${state.workspace.id}` },
-        reload,
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'mfa_transactions',
-          filter: `workspace_id=eq.${state.workspace.id}`,
-        },
-        reload,
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'mfa_monthly_budgets',
-          filter: `workspace_id=eq.${state.workspace.id}`,
-        },
-        reload,
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'mfa_goals', filter: `workspace_id=eq.${state.workspace.id}` },
-        reload,
-      )
-      .subscribe()
+    if (realtimeChannel) clearInterval(realtimeChannel)
+    realtimeChannel = setInterval(async () => {
+      if (document.visibilityState !== 'visible' || !session) return
+      try {
+        await refreshCloud()
+        const route = getRoute()
+        if (!route.path.startsWith('/view/')) render()
+      } catch {
+        // Keep the last successful cloud state visible.
+      }
+    }, 15000)
   }
 
   async function mutateLocal(mutator) {
@@ -1424,7 +1415,7 @@
       : '<div class="panel empty-state"><h2>No My Fund App accounts yet</h2><p>Accounts appear here after they sign in to this app.</p></div>'
 
     const content = `
-      ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<button class="secondary-button" data-action="refresh-admin">↻ Refresh</button>')}
+      ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<div class="button-row"><button class="secondary-button" data-action="migrate-supabase">⇄ Import Supabase data</button><button class="secondary-button" data-action="refresh-admin">↻ Refresh</button></div>')}
       <section class="summary-grid admin-summary-grid">
         ${summaryCard('App accounts', String(users.length), '◎', 'Only users who opened My Fund App')}
         ${summaryCard('Tracked people', String(people.length), '◉', 'Across every My Fund App workspace')}
@@ -1690,6 +1681,16 @@
 
   function render() {
     clearInterval(viewerTimer)
+    if (CLOUD_UNAVAILABLE) {
+      document.getElementById('app').innerHTML = `
+        <div class="viewer-error">
+          <div class="brand-mark">M</div>
+          <h1>Cloud service unavailable</h1>
+          <p>My Fund App is configured for cloud storage, but the authentication or Neon data service did not load. Your finance data has not been switched to browser-only storage.</p>
+          <button class="primary-button" onclick="location.reload()">Try again</button>
+        </div>`
+      return
+    }
     const route = getRoute()
     if (route.path.startsWith('/view/')) {
       loadViewer(route.segments[1])
@@ -2229,7 +2230,7 @@
       const values = Object.fromEntries(new FormData(form).entries())
       try {
         const redirectTo = CONFIG.appUrl || `${location.origin}${location.pathname}`
-        const result = await db.auth.resetPasswordForEmail(values.email, { redirectTo })
+        const result = await authDb.auth.resetPasswordForEmail(values.email, { redirectTo })
         if (result.error) throw result.error
         renderForgotPassword('Reset link sent. Check your inbox and spam folder.', values.email)
       } catch (error) {
@@ -2251,7 +2252,7 @@
         return
       }
       try {
-        const result = await db.auth.updateUser({ password: values.password })
+        const result = await authDb.auth.updateUser({ password: values.password })
         if (result.error) throw result.error
         passwordRecoveryMode = false
         await refreshCloud()
@@ -2275,8 +2276,8 @@
       try {
         const result =
           mode === 'signin'
-            ? await db.auth.signInWithPassword({ email: values.email, password: values.password })
-            : await db.auth.signUp({
+            ? await authDb.auth.signInWithPassword({ email: values.email, password: values.password })
+            : await authDb.auth.signUp({
                 email: values.email,
                 password: values.password,
                 options: {
@@ -2317,6 +2318,21 @@
     }
     if (action === 'back-to-signin') {
       renderAuth()
+      return
+    }
+    if (action === 'migrate-supabase') {
+      if (!isPlatformAdmin() || busy) return
+      if (!confirm('Import the current My Fund App snapshot from Supabase into Neon? Existing matching records in Neon will be updated.')) return
+      busy = true
+      try {
+        const result = await migrateSupabaseSnapshotToNeon()
+        render()
+        toast(`Neon import complete: ${result.workspaces || 0} workspaces, ${result.people || 0} people and ${result.transactions || 0} transactions processed.`)
+      } catch (error) {
+        toast(error.message || 'Unable to import Supabase data into Neon.', 'danger')
+      } finally {
+        busy = false
+      }
       return
     }
     if (action === 'refresh-admin') {
@@ -2511,7 +2527,7 @@
     }
     if (action === 'signout') {
       adminState = null
-      await db.auth.signOut()
+      await authDb.auth.signOut()
       return
     }
     if (action === 'auth-mode') {
@@ -2552,15 +2568,19 @@
     }
 
     if (!CLOUD_ENABLED) {
+      if (CLOUD_UNAVAILABLE) {
+        render()
+        return
+      }
       state = loadLocal()
       if (!location.hash) go('/dashboard')
       render()
       return
     }
 
-    const sessionResult = await db.auth.getSession()
+    const sessionResult = await authDb.auth.getSession()
     session = sessionResult.data.session
-    db.auth.onAuthStateChange(async (event, nextSession) => {
+    authDb.auth.onAuthStateChange(async (event, nextSession) => {
       session = nextSession
       if (event === 'PASSWORD_RECOVERY') {
         passwordRecoveryMode = true
