@@ -1,13 +1,15 @@
 const DATA_API_URL = process.env.MY_FUND_DATA_API_URL || 'https://ep-cool-lake-b5w5dfc2.apirest.c-7.us-east-2.aws.neon.tech/my_fund_app/rest/v1'
 
-async function rpc(name, payload, authorization) {
+async function rpc(name, payload, authorization = '') {
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  }
+  if (authorization) headers.Authorization = authorization
+
   const response = await fetch(`${DATA_API_URL}/rpc/${name}`, {
     method: 'POST',
-    headers: {
-      Authorization: authorization,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
+    headers,
     body: JSON.stringify(payload),
   })
 
@@ -40,8 +42,11 @@ module.exports = async function handler(req, res) {
   }
 
   const authorization = String(req.headers.authorization || '')
-  if (!authorization.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authentication required' })
+  const shareToken = String(req.body?.share_token || '').trim()
+  const hasUserAuth = authorization.startsWith('Bearer ')
+  const hasShareToken = /^[0-9a-f-]{36}$/i.test(shareToken)
+  if (!hasUserAuth && !hasShareToken) {
+    return res.status(401).json({ error: 'Authentication or a secure person link is required' })
   }
 
   const apiKey = process.env.RESEND_API_KEY
@@ -56,7 +61,9 @@ module.exports = async function handler(req, res) {
 
   let claimed
   try {
-    claimed = await rpc('mfa_claim_request_email', { p_request_id: requestId }, authorization)
+    claimed = hasShareToken
+      ? await rpc('mfa_claim_public_request_email', { p_request_id: requestId, p_token: shareToken })
+      : await rpc('mfa_claim_request_email', { p_request_id: requestId }, authorization)
   } catch (error) {
     return res.status(403).json({ error: error.message || 'Unable to claim approval email' })
   }
@@ -110,15 +117,24 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    await rpc(
-      'mfa_complete_request_email',
-      {
+    if (hasShareToken) {
+      await rpc('mfa_complete_public_request_email', {
         p_outbox_id: claimed.outbox_id,
+        p_token: shareToken,
         p_success: success,
         p_error: success ? null : deliveryError,
-      },
-      authorization,
-    )
+      })
+    } else {
+      await rpc(
+        'mfa_complete_request_email',
+        {
+          p_outbox_id: claimed.outbox_id,
+          p_success: success,
+          p_error: success ? null : deliveryError,
+        },
+        authorization,
+      )
+    }
   } catch (error) {
     if (success) {
       return res.status(200).json({
