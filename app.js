@@ -1730,7 +1730,7 @@
   }
 
   function passwordField(name, label, idValue, options = {}) {
-    const minlength = options.minlength || 6
+    const minlength = options.minlength || 8
     const autocomplete = options.autocomplete || 'current-password'
     return `<label class="field"><span>${escapeHtml(label)}</span><div class="password-input-wrap"><input id="${idValue}" name="${name}" type="password" minlength="${minlength}" autocomplete="${autocomplete}" required><button type="button" class="password-toggle" data-action="toggle-password" data-target="${idValue}">Show</button></div></label>`
   }
@@ -1773,7 +1773,7 @@
       <div class="auth-page">
         ${authBrand()}
         <form class="auth-card" id="reset-password-form">
-          <div class="auth-form-heading"><h2>Choose a new password</h2><p>Use at least six characters.</p></div>
+          <div class="auth-form-heading"><h2>Choose a new password</h2><p>Use at least eight characters.</p></div>
           ${passwordField('password', 'New password', 'new-password', { autocomplete: 'new-password' })}
           ${passwordField('confirm_password', 'Confirm new password', 'confirm-new-password', { autocomplete: 'new-password' })}
           ${message ? `<div class="info-box">${escapeHtml(message)}</div>` : ''}
