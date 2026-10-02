@@ -473,14 +473,24 @@
   }
 
   function shell(content, active) {
-    const nav = [
-      ['dashboard', '▦', 'Dashboard'],
-      ['people', '◉', 'People'],
-      ['transactions', '≡', 'Transactions'],
-      ['reports', '⇩', 'Reports'],
-      ...(isPlatformAdmin() ? [['admin', '◆', 'Platform admin']] : []),
-      ['settings', '⚙', 'Settings'],
-    ]
+    const ownerPending = (approvalState.requests || []).filter((item) => item.status === 'pending').length
+    const contributorUnread = (contributorState?.notifications || []).filter((item) => !item.is_read).length
+    const navItems = isContributor()
+      ? [
+          ['contributor', '▦', 'My records'],
+          ['requests', '◎', `Requests${contributorUnread ? ` · ${contributorUnread}` : ''}`],
+        ]
+      : [
+          ['dashboard', '▦', 'Dashboard'],
+          ['people', '◉', 'People'],
+          ['transactions', '≡', 'Transactions'],
+          ['approvals', '✓', `Approvals${ownerPending ? ` · ${ownerPending}` : ''}`],
+          ['reports', '⇩', 'Reports'],
+          ...(isPlatformAdmin() ? [['admin', '◆', 'Platform admin']] : []),
+          ['settings', '⚙', 'Settings'],
+        ]
+
+    const nav = navItems
       .map(
         ([path, glyph, label]) => `
           <a class="nav-item ${active === path ? 'active' : ''}" href="#/${path}">
