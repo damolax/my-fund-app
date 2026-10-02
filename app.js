@@ -1858,6 +1858,104 @@
       </article>`
   }
 
+  async function triggerPublicRequestEmail(requestId) {
+    if (!requestId || !viewerToken) return
+    try {
+      await fetch('/api/record-request-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id: requestId, share_token: viewerToken }),
+      })
+    } catch {
+      // The manager's in-app notification remains active even if outbound email is unavailable.
+    }
+  }
+
+  async function submitViewerRequest(values) {
+    const result = await db.rpc('mfa_submit_public_record_request', {
+      p_token: viewerToken,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || viewerState?.workspace?.default_currency || 'NGN').trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerPublicRequestEmail(result.data?.id)
+    return result.data
+  }
+
+  async function updateViewerRequest(requestId, values) {
+    const result = await db.rpc('mfa_update_public_record_request', {
+      p_token: viewerToken,
+      p_request_id: requestId,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || viewerState?.workspace?.default_currency || 'NGN').trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerPublicRequestEmail(requestId)
+    return result.data
+  }
+
+  async function deleteViewerRequest(requestId) {
+    const result = await db.rpc('mfa_delete_public_record_request', {
+      p_token: viewerToken,
+      p_request_id: requestId,
+    })
+    if (result.error) throw result.error
+  }
+
+  function viewerRequestCards(requests) {
+    if (!requests.length) return '<div class="small-empty">You have not submitted any record requests yet.</div>'
+    return `<div class="request-list">${requests.map((item) => {
+      const editable = item.status === 'pending'
+      return `
+        <article class="request-card" data-request-id="${item.id}">
+          <div class="request-card-head">
+            <div><span class="eyebrow">New ${item.transaction_type === 'income' ? 'income' : 'expense'} record</span><h3>${escapeHtml(item.description)}</h3></div>
+            ${requestStatusBadge(item.status)}
+          </div>
+          <div class="request-meta"><strong>${item.transaction_type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</strong><span>${formatDate(item.date)}</span>${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}</div>
+          ${item.reviewer_note ? `<div class="review-note"><strong>Manager note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
+          ${editable ? `<div class="request-actions"><button class="secondary-button" data-action="viewer-edit-request" data-request-id="${item.id}">Edit pending request</button><button class="text-button danger-text" data-action="viewer-delete-request" data-request-id="${item.id}">Delete pending request</button></div>` : `<div class="immutable-note">${item.status === 'approved' ? 'Approved and recorded. This ledger record cannot be changed from your link.' : 'Rejected. This request is locked and did not change the ledger.'}</div>`}
+        </article>`
+    }).join('')}</div>`
+  }
+
+  function openViewerRequestModal(options = {}) {
+    if (!viewerState?.person || !CLOUD_ENABLED) return
+    const existing = options.requestId ? (viewerState.requests || []).find((item) => item.id === options.requestId) : null
+    if (existing && existing.status !== 'pending') {
+      toast('Only pending requests can be edited.', 'danger')
+      return
+    }
+    const type = existing?.transaction_type || options.type || 'income'
+    const amount = existing?.amount ?? ''
+    const currency = existing?.currency || viewerState.workspace.default_currency
+    const date = existing?.date ? String(existing.date).slice(0, 10) : today()
+    const unknownDate = existing ? !existing.date : false
+    const description = existing?.description || ''
+    const category = existing?.category || 'Other'
+    const body = `
+      <form class="modal-form" id="viewer-request-form">
+        <input type="hidden" name="request_id" value="${escapeHtml(existing?.id || '')}">
+        ${currencyDatalist()}
+        <div class="two-fields"><label class="field"><span>Record type</span><select name="type"><option value="income" ${type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${type === 'expense' ? 'selected' : ''}>Expense</option></select></label><label class="field"><span>Amount</span><input name="amount" type="number" min="0.01" step="0.01" value="${escapeHtml(amount)}" required></label></div>
+        <div class="two-fields"><label class="field"><span>Currency</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(currency)}" required></label><label class="field"><span>Date</span><input name="date" type="date" value="${unknownDate ? '' : escapeHtml(date)}" ${unknownDate ? 'disabled' : ''}></label></div>
+        <label class="checkbox-row"><input name="date_unknown" type="checkbox" data-action="viewer-toggle-request-unknown-date" ${unknownDate ? 'checked' : ''}><span>Date unknown or not remembered</span></label>
+        <label class="field"><span>Expense category</span><select name="category">${EXPENSE_CATEGORIES.map((item) => `<option value="${item}" ${item === category ? 'selected' : ''}>${item}</option>`).join('')}</select><small>Ignored when the record type is Income.</small></label>
+        <label class="field"><span>Description</span><input name="description" value="${escapeHtml(description)}" placeholder="What is this record for?" required></label>
+        <div class="notice">This only requests a new record. Approved records cannot be edited or deleted from this link. Your balance changes only after the manager approves it.</div>
+        <div id="viewer-request-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">${existing ? 'Save pending request' : 'Submit for approval'}</button></div>
+      </form>`
+    openModal(existing ? 'Edit pending request' : `Request new ${type} record`, body)
+  }
   function renderViewer(payload) {
     viewerState = payload
     const person = { ...payload.person, starting_balances: payload.person.starting_balances || {} }
