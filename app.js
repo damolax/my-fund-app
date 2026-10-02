@@ -2744,6 +2744,26 @@
     const form = event.target
     if (!(form instanceof HTMLFormElement)) return
 
+    if (form.id === 'viewer-request-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('viewer-request-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        values.date_unknown = form.querySelector('input[name="date_unknown"]')?.checked || false
+        if (values.request_id) await updateViewerRequest(values.request_id, values)
+        else await submitViewerRequest(values)
+        closeModal()
+        await loadViewer(viewerToken)
+        toast(values.request_id ? 'Pending request updated.' : 'Request sent for manager approval.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message || 'Unable to save request.')}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
     if (form.id === 'invite-contributor-form') {
       event.preventDefault()
       if (busy) return
@@ -3040,7 +3060,34 @@
       }
       return
     }
-    if (action === 'open-request') {
+    if (action === 'viewer-open-request') {
+      openViewerRequestModal({ type: target.dataset.type || 'income' })
+      return
+    }
+    if (action === 'viewer-edit-request') {
+      openViewerRequestModal({ requestId: target.dataset.requestId })
+      return
+    }
+    if (action === 'viewer-delete-request') {
+      if (!confirm('Delete this pending request?')) return
+      try {
+        await deleteViewerRequest(target.dataset.requestId)
+        await loadViewer(viewerToken)
+        toast('Pending request deleted.')
+      } catch (error) {
+        toast(error.message || 'Unable to delete request.', 'danger')
+      }
+      return
+    }
+    if (action === 'viewer-toggle-request-unknown-date') {
+      const dateInput = target.closest('form')?.querySelector('input[name="date"]')
+      if (dateInput) {
+        dateInput.disabled = target.checked
+        if (target.checked) dateInput.value = ''
+        else if (!dateInput.value) dateInput.value = today()
+      }
+      return
+    }    if (action === 'open-request') {
       openContributorRequestModal({ type: target.dataset.type || 'income' })
       return
     }
