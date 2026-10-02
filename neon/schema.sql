@@ -395,7 +395,7 @@ stable
 security definer
 set search_path = auth
 as $mfa$
-  select lower(trim(coalesce(auth.session() ->> 'email', '')));
+  select lower(trim(coalesce(auth.session() ->> 'email', auth.session() -> 'user' ->> 'email', auth.session() ->> 'user_email', '')));
 $mfa$;
 
 revoke all on function public.mfa_current_email() from public;
