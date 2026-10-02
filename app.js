@@ -527,13 +527,26 @@
   async function refreshCloud() {
     if (!CLOUD_ENABLED || !session?.user) return
     try {
-      let workspaceResult = await db
-        .from('mfa_workspaces')
-        .select('*')
-        .eq('owner_id', session.user.id)
-        .maybeSingle()
-      if (workspaceResult.error) throw workspaceResult.error
-      let workspace = workspaceResult.data
+      const contextResult = await db.rpc('mfa_get_access_context')
+      if (contextResult.error) throw contextResult.error
+      accessContext = contextResult.data || null
+
+      if (accessContext?.role === 'contributor') {
+        await touchAppUser()
+        await refreshContributorDashboard()
+        subscribeRealtime()
+        return
+      }
+
+      let workspace = accessContext?.role === 'owner' ? accessContext.workspace : null
+      const route = getRoute()
+
+      if (!workspace && route.path.startsWith('/join/')) {
+        state = structuredClone(DEFAULT_DATA)
+        contributorState = null
+        return
+      }
+
       if (!workspace) {
         const created = await db
           .from('mfa_workspaces')
@@ -547,11 +560,15 @@
           .single()
         if (created.error) throw created.error
         workspace = created.data
+        accessContext = { role: 'owner', workspace }
+      } else {
+        accessContext = { ...accessContext, role: 'owner', workspace }
       }
 
+      contributorState = null
       await touchAppUser()
 
-      const [peopleResult, transactionResult, budgetResult, goalResult] = await Promise.all([
+      const [peopleResult, transactionResult, budgetResult, goalResult, approvalResult] = await Promise.all([
         db.from('mfa_people').select('*').eq('workspace_id', workspace.id).order('created_at'),
         db
           .from('mfa_transactions')
@@ -561,8 +578,9 @@
           .order('created_at', { ascending: false }),
         db.from('mfa_monthly_budgets').select('*').eq('workspace_id', workspace.id),
         db.from('mfa_goals').select('*').eq('workspace_id', workspace.id),
+        db.rpc('mfa_get_approval_center'),
       ])
-      for (const result of [peopleResult, transactionResult, budgetResult, goalResult]) {
+      for (const result of [peopleResult, transactionResult, budgetResult, goalResult, approvalResult]) {
         if (result.error) throw result.error
       }
       state = normalizeCloudData({
@@ -572,6 +590,8 @@
         budgets: budgetResult.data,
         goals: goalResult.data,
       })
+      approvalState = approvalResult.data || { requests: [], notifications: [], members: [], invites: [] }
+      approvalError = ''
       subscribeRealtime()
     } catch (error) {
       toast(error.message || 'Unable to load cloud records.', 'danger')
