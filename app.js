@@ -3,8 +3,13 @@
 
   const STORAGE_KEY = 'my-fund-app-v1'
   const CONFIG = window.MY_FUND_CONFIG || {}
-  const CLOUD_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
-  const db = CLOUD_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
+  const CLOUD_CONFIGURED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && CONFIG.neonDataApiUrl)
+  const AUTH_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
+  const DATA_ENABLED = Boolean(CONFIG.neonDataApiUrl && window.createNeonDataClient)
+  const CLOUD_ENABLED = CLOUD_CONFIGURED && AUTH_ENABLED && DATA_ENABLED
+  const CLOUD_UNAVAILABLE = CLOUD_CONFIGURED && !CLOUD_ENABLED
+  const authDb = AUTH_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
+  const db = DATA_ENABLED ? window.createNeonDataClient(CONFIG.neonDataApiUrl, () => session?.access_token || null) : null
   const ADMIN_EMAIL = String(CONFIG.adminEmail || 'oyekunleolalekan3168@gmail.com').trim().toLowerCase()
 
   const DEFAULT_DATA = {
@@ -157,6 +162,18 @@
     adminState = result.data || { users: [], workspaces: [], people: [], transactions: [], budgets: [], goals: [] }
     adminError = ''
     return adminState
+  }
+
+  async function migrateSupabaseSnapshotToNeon() {
+    if (!isPlatformAdmin()) throw new Error('Platform admin access is restricted.')
+    if (!authDb) throw new Error('Supabase authentication is unavailable.')
+    const source = await authDb.rpc('mfa_admin_overview')
+    if (source.error) throw source.error
+    const imported = await db.rpc('mfa_import_supabase_snapshot', { p_payload: source.data })
+    if (imported.error) throw imported.error
+    await refreshCloud()
+    await refreshAdmin()
+    return imported.data || {}
   }
 
   function normalizeCloudData(payload) {
@@ -453,15 +470,53 @@
             <button class="icon-button" data-action="refresh" title="Refresh">↻</button>
           </header>
           ${
-            !CLOUD_ENABLED
-              ? '<div class="local-banner"><span>◈</span><span>This app works immediately in local mode. Add Supabase keys in config.js for accounts, cross-device data and live secure links.</span></div>'
-              : ''
+            CLOUD_UNAVAILABLE
+              ? '<div class="local-banner"><span>!</span><span>Cloud services are configured but unavailable. No finance data will be saved locally until the cloud connection is restored.</span></div>'
+              : !CLOUD_CONFIGURED
+                ? '<div class="local-banner"><span>◈</span><span>Local development mode is active because no cloud configuration is present.</span></div>'
+                : ''
           }
           <div id="toast"></div>
           <div class="page-wrap">${content}</div>
         </main>
       </div>
       <div id="modal-root"></div>`
+  }
+
+  async function migrateSignedInUserFromSupabase() {
+    if (!authDb || !db || !session?.user) return null
+
+    const sourceWorkspaceResult = await authDb
+      .from('mfa_workspaces')
+      .select('*')
+      .eq('owner_id', session.user.id)
+      .maybeSingle()
+    if (sourceWorkspaceResult.error) throw sourceWorkspaceResult.error
+    const sourceWorkspace = sourceWorkspaceResult.data
+    if (!sourceWorkspace) return null
+
+    const [peopleResult, transactionResult, budgetResult, goalResult] = await Promise.all([
+      authDb.from('mfa_people').select('*').eq('workspace_id', sourceWorkspace.id),
+      authDb.from('mfa_transactions').select('*').eq('workspace_id', sourceWorkspace.id),
+      authDb.from('mfa_monthly_budgets').select('*').eq('workspace_id', sourceWorkspace.id),
+      authDb.from('mfa_goals').select('*').eq('workspace_id', sourceWorkspace.id),
+    ])
+
+    for (const result of [peopleResult, transactionResult, budgetResult, goalResult]) {
+      if (result.error) throw result.error
+    }
+
+    const imported = await db.rpc('mfa_import_own_snapshot', {
+      p_payload: {
+        workspaces: [sourceWorkspace],
+        people: peopleResult.data || [],
+        transactions: transactionResult.data || [],
+        budgets: budgetResult.data || [],
+        goals: goalResult.data || [],
+      },
+    })
+    if (imported.error) throw imported.error
+    return imported.data || null
   }
 
   async function refreshCloud() {
@@ -474,6 +529,19 @@
         .maybeSingle()
       if (workspaceResult.error) throw workspaceResult.error
       let workspace = workspaceResult.data
+      if (!workspace) {
+        const migrated = await migrateSignedInUserFromSupabase()
+        if (migrated?.imported) {
+          workspaceResult = await db
+            .from('mfa_workspaces')
+            .select('*')
+            .eq('owner_id', session.user.id)
+            .maybeSingle()
+          if (workspaceResult.error) throw workspaceResult.error
+          workspace = workspaceResult.data
+        }
+      }
+
       if (!workspace) {
         const created = await db
           .from('mfa_workspaces')
@@ -521,45 +589,17 @@
 
   function subscribeRealtime() {
     if (!CLOUD_ENABLED || !state.workspace?.id || state.workspace.id === 'local-workspace') return
-    if (realtimeChannel) db.removeChannel(realtimeChannel)
-    const reload = async () => {
-      await refreshCloud()
-      const route = getRoute()
-      if (!route.path.startsWith('/view/')) render()
-    }
-    realtimeChannel = db
-      .channel(`mfa-${state.workspace.id}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'mfa_people', filter: `workspace_id=eq.${state.workspace.id}` },
-        reload,
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'mfa_transactions',
-          filter: `workspace_id=eq.${state.workspace.id}`,
-        },
-        reload,
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'mfa_monthly_budgets',
-          filter: `workspace_id=eq.${state.workspace.id}`,
-        },
-        reload,
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'mfa_goals', filter: `workspace_id=eq.${state.workspace.id}` },
-        reload,
-      )
-      .subscribe()
+    if (realtimeChannel) clearInterval(realtimeChannel)
+    realtimeChannel = setInterval(async () => {
+      if (document.visibilityState !== 'visible' || !session) return
+      try {
+        await refreshCloud()
+        const route = getRoute()
+        if (!route.path.startsWith('/view/')) render()
+      } catch {
+        // Keep the last successful cloud state visible.
+      }
+    }, 15000)
   }
 
   async function mutateLocal(mutator) {
@@ -1372,18 +1412,68 @@
     const people = payload.people || []
     const transactions = payload.transactions || []
     const currencies = adminCurrenciesForPeople(people, payload)
+    const mainUser = users.find((user) => String(user.email || '').trim().toLowerCase() === ADMIN_EMAIL)
+    const sortedUsers = [...users].sort((a, b) => {
+      const aMain = String(a.email || '').trim().toLowerCase() === ADMIN_EMAIL ? 1 : 0
+      const bMain = String(b.email || '').trim().toLowerCase() === ADMIN_EMAIL ? 1 : 0
+      if (aMain !== bMain) return bMain - aMain
+      return String(b.last_seen_at || '').localeCompare(String(a.last_seen_at || ''))
+    })
 
-    const fundCards = currencies.length
-      ? currencies.map((currency) => {
-          const positions = people.map((person) => adminBalanceForPerson(person.id, currency, payload))
-          const positive = round(positions.reduce((sum, item) => sum + Math.max(item.balance, 0), 0))
-          const borrowed = round(positions.reduce((sum, item) => sum + Math.abs(Math.min(item.balance, 0)), 0))
-          return `<article class="admin-fund-card"><span>${currency}</span><strong>${money(positive - borrowed, currency)}</strong><small>${money(positive, currency)} positive · ${money(borrowed, currency)} borrowed</small></article>`
+    const currencyAnalysis = currencies.map((currency) => {
+      const positions = people.map((person) => adminBalanceForPerson(person.id, currency, payload))
+      const currentPositive = round(positions.reduce((sum, item) => sum + Math.max(item.balance, 0), 0))
+      const borrowed = round(positions.reduce((sum, item) => sum + Math.abs(Math.min(item.balance, 0)), 0))
+      const currentNet = round(currentPositive - borrowed)
+      const openingTracked = round(
+        people.reduce((sum, person) => sum + Math.max(num(person.starting_balances?.[currency]), 0), 0),
+      )
+      const incomeTracked = round(
+        transactions
+          .filter((item) => item.type === 'income' && item.currency === currency)
+          .reduce((sum, item) => sum + num(item.amount), 0),
+      )
+      const expenses = round(
+        transactions
+          .filter((item) => item.type === 'expense' && item.currency === currency)
+          .reduce((sum, item) => sum + num(item.amount), 0),
+      )
+      return {
+        currency,
+        totalTracked: round(openingTracked + incomeTracked),
+        expenses,
+        currentPositive,
+        borrowed,
+        currentNet,
+      }
+    })
+
+    const fundCards = currencyAnalysis.length
+      ? currencyAnalysis.map((item) => {
+          return `<article class="admin-fund-card">
+            <span>${item.currency}</span>
+            <strong>${money(item.currentNet, item.currency)}</strong>
+            <small>Currently held · ${money(item.totalTracked, item.currency)} tracked · ${money(item.expenses, item.currency)} spent · ${money(item.borrowed, item.currency)} borrowed</small>
+          </article>`
         }).join('')
       : '<div class="empty-inline">No starting balances or transactions have been recorded yet.</div>'
 
-    const accountPanels = users.length
-      ? users.map((user) => {
+    const trackedCards = currencyAnalysis.length
+      ? currencyAnalysis.map((item) => `<article class="admin-fund-card"><span>${item.currency} tracked</span><strong>${money(item.totalTracked, item.currency)}</strong><small>Opening positive balances + recorded income</small></article>`).join('')
+      : '<div class="empty-inline">No money has been tracked yet.</div>'
+
+    const mainWorkspace = mainUser ? workspaces.find((item) => item.owner_id === mainUser.user_id) : null
+    const mainPeople = mainWorkspace ? people.filter((item) => item.workspace_id === mainWorkspace.id) : []
+    const mainPersonIds = new Set(mainPeople.map((item) => item.id))
+    const mainTransactions = transactions.filter((item) => mainPersonIds.has(item.person_id))
+    const mainCurrencies = adminCurrenciesForPeople(mainPeople, payload)
+    const mainHoldings = mainCurrencies.map((currency) => {
+      const total = round(mainPeople.reduce((sum, person) => sum + adminBalanceForPerson(person.id, currency, payload).balance, 0))
+      return `<span class="balance-pill ${total < 0 ? 'negative-pill' : ''}">${money(total, currency)}</span>`
+    }).join('') || '<span class="muted-text">No funds recorded</span>'
+
+    const accountPanels = sortedUsers.length
+      ? sortedUsers.map((user) => {
           const workspace = workspaces.find((item) => item.owner_id === user.user_id)
           const accountPeople = workspace ? people.filter((item) => item.workspace_id === workspace.id) : []
           const personIds = new Set(accountPeople.map((item) => item.id))
@@ -1407,9 +1497,10 @@
                 return `<tr><td><strong>${escapeHtml(person.name)}</strong></td><td>${balances}</td><td>${accountTransactions.filter((item) => item.person_id === person.id).length}</td><td>${formatTimestamp(person.created_at)}</td></tr>`
               }).join('')
             : '<tr><td colspan="4" class="empty-cell">This account has not added anyone yet.</td></tr>'
+          const isMainAccount = String(user.email || '').trim().toLowerCase() === ADMIN_EMAIL
           return `<article class="panel admin-account-card">
             <div class="admin-account-head">
-              <div><span class="eyebrow">Account</span><h2>${escapeHtml(user.email || 'Unknown email')}</h2><p>${escapeHtml(workspace?.name || 'Workspace not created yet')}</p></div>
+              <div><span class="eyebrow">${isMainAccount ? 'Main account · Administrator' : 'Account'}</span><h2>${escapeHtml(user.email || 'Unknown email')}</h2><p>${escapeHtml(workspace?.name || 'Workspace not created yet')}</p></div>
               <div class="admin-account-totals">${accountTotals}</div>
             </div>
             <div class="admin-meta-grid">
@@ -1424,14 +1515,30 @@
       : '<div class="panel empty-state"><h2>No My Fund App accounts yet</h2><p>Accounts appear here after they sign in to this app.</p></div>'
 
     const content = `
-      ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<button class="secondary-button" data-action="refresh-admin">↻ Refresh</button>')}
+      ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<div class="button-row"><button class="secondary-button" data-action="migrate-supabase">⇄ Import Supabase data</button><button class="secondary-button" data-action="refresh-admin">↻ Refresh</button></div>')}
       <section class="summary-grid admin-summary-grid">
-        ${summaryCard('App accounts', String(users.length), '◎', 'Only users who opened My Fund App')}
-        ${summaryCard('Tracked people', String(people.length), '◉', 'Across every My Fund App workspace')}
-        ${summaryCard('Transactions', String(transactions.length), '≡', 'Income and expenses recorded')}
-        ${summaryCard('Administrator', ADMIN_EMAIL, '◆', 'Platform-wide read-only access')}
+        ${summaryCard('Accounts using app', String(users.length), '◎', 'Registered My Fund App accounts')}
+        ${summaryCard('People being tracked', String(people.length), '◉', 'Across every account')}
+        ${summaryCard('Total records', String(transactions.length), '≡', 'Income and expense records')}
+        ${summaryCard('Main account', mainUser ? ADMIN_EMAIL : 'Not used yet', '◆', mainUser ? `${mainPeople.length} people · ${mainTransactions.length} records` : 'Administrator has not created a workspace yet')}
       </section>
-      <section class="panel"><div class="panel-heading"><div><h2>Net funds across all accounts</h2><p>Negative balances are deducted from positive balances. Currencies remain separate.</p></div></div><div class="admin-funds-grid">${fundCards}</div></section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Platform analysis</h2><p>Total tracked is positive opening balances plus recorded income. Current holdings are what remains after expenses, with borrowed balances shown separately.</p></div></div>
+        <div class="admin-funds-grid">${fundCards}</div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Total money tracked</h2><p>Gross money entered into My Fund App, kept separate by currency.</p></div></div>
+        <div class="admin-funds-grid">${trackedCards}</div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Main account</h2><p>${escapeHtml(ADMIN_EMAIL)} · your administrator workspace and current holdings.</p></div></div>
+        <div class="admin-meta-grid">
+          <span><strong>${mainPeople.length}</strong> tracked people</span>
+          <span><strong>${mainTransactions.length}</strong> records</span>
+          <span><strong>${mainWorkspace ? 'Active' : 'Not created'}</strong> workspace</span>
+          <span>${mainHoldings}</span>
+        </div>
+      </section>
       <section class="admin-account-list">${accountPanels}</section>`
     return shell(content, 'admin')
   }
@@ -1690,6 +1797,16 @@
 
   function render() {
     clearInterval(viewerTimer)
+    if (CLOUD_UNAVAILABLE) {
+      document.getElementById('app').innerHTML = `
+        <div class="viewer-error">
+          <div class="brand-mark">M</div>
+          <h1>Cloud service unavailable</h1>
+          <p>My Fund App is configured for cloud storage, but the authentication or Neon data service did not load. Your finance data has not been switched to browser-only storage.</p>
+          <button class="primary-button" onclick="location.reload()">Try again</button>
+        </div>`
+      return
+    }
     const route = getRoute()
     if (route.path.startsWith('/view/')) {
       loadViewer(route.segments[1])
@@ -2229,7 +2346,7 @@
       const values = Object.fromEntries(new FormData(form).entries())
       try {
         const redirectTo = CONFIG.appUrl || `${location.origin}${location.pathname}`
-        const result = await db.auth.resetPasswordForEmail(values.email, { redirectTo })
+        const result = await authDb.auth.resetPasswordForEmail(values.email, { redirectTo })
         if (result.error) throw result.error
         renderForgotPassword('Reset link sent. Check your inbox and spam folder.', values.email)
       } catch (error) {
@@ -2251,7 +2368,7 @@
         return
       }
       try {
-        const result = await db.auth.updateUser({ password: values.password })
+        const result = await authDb.auth.updateUser({ password: values.password })
         if (result.error) throw result.error
         passwordRecoveryMode = false
         await refreshCloud()
@@ -2275,8 +2392,8 @@
       try {
         const result =
           mode === 'signin'
-            ? await db.auth.signInWithPassword({ email: values.email, password: values.password })
-            : await db.auth.signUp({
+            ? await authDb.auth.signInWithPassword({ email: values.email, password: values.password })
+            : await authDb.auth.signUp({
                 email: values.email,
                 password: values.password,
                 options: {
@@ -2317,6 +2434,21 @@
     }
     if (action === 'back-to-signin') {
       renderAuth()
+      return
+    }
+    if (action === 'migrate-supabase') {
+      if (!isPlatformAdmin() || busy) return
+      if (!confirm('Import the current My Fund App snapshot from Supabase into Neon? Existing matching records in Neon will be updated.')) return
+      busy = true
+      try {
+        const result = await migrateSupabaseSnapshotToNeon()
+        render()
+        toast(`Neon import complete: ${result.workspaces || 0} workspaces, ${result.people || 0} people and ${result.transactions || 0} transactions processed.`)
+      } catch (error) {
+        toast(error.message || 'Unable to import Supabase data into Neon.', 'danger')
+      } finally {
+        busy = false
+      }
       return
     }
     if (action === 'refresh-admin') {
@@ -2511,7 +2643,7 @@
     }
     if (action === 'signout') {
       adminState = null
-      await db.auth.signOut()
+      await authDb.auth.signOut()
       return
     }
     if (action === 'auth-mode') {
@@ -2552,15 +2684,19 @@
     }
 
     if (!CLOUD_ENABLED) {
+      if (CLOUD_UNAVAILABLE) {
+        render()
+        return
+      }
       state = loadLocal()
       if (!location.hash) go('/dashboard')
       render()
       return
     }
 
-    const sessionResult = await db.auth.getSession()
+    const sessionResult = await authDb.auth.getSession()
     session = sessionResult.data.session
-    db.auth.onAuthStateChange(async (event, nextSession) => {
+    authDb.auth.onAuthStateChange(async (event, nextSession) => {
       session = nextSession
       if (event === 'PASSWORD_RECOVERY') {
         passwordRecoveryMode = true
