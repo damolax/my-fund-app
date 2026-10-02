@@ -210,6 +210,128 @@ $$;
 revoke all on function public.mfa_get_person_public_view(uuid) from public;
 grant execute on function public.mfa_get_person_public_view(uuid) to anonymous, authenticated;
 
+create or replace function public.mfa_import_own_snapshot(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $
+declare
+  v_user_id text := (select auth.user_id());
+  v_email text := lower(trim(coalesce((select auth.session() ->> 'email'), '')));
+  v_workspace_id uuid;
+  v_existing_workspace_id uuid;
+begin
+  if coalesce(v_user_id, '') = '' then raise exception 'Authentication required'; end if;
+  if v_email = '' then raise exception 'Account email is unavailable'; end if;
+
+  if jsonb_array_length(coalesce(p_payload->'workspaces', '[]'::jsonb)) > 1 then
+    raise exception 'Only one workspace can be imported for the signed-in account';
+  end if;
+
+  select x.id into v_workspace_id
+  from jsonb_to_recordset(coalesce(p_payload->'workspaces', '[]'::jsonb))
+    as x(id uuid, owner_id text)
+  where x.owner_id = v_user_id
+  limit 1;
+
+  if v_workspace_id is null then
+    return jsonb_build_object('imported', false, 'reason', 'no_source_workspace');
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_to_recordset(coalesce(p_payload->'workspaces', '[]'::jsonb))
+      as x(id uuid, owner_id text)
+    where x.owner_id <> v_user_id
+  ) then
+    raise exception 'Workspace owner does not match the signed-in account';
+  end if;
+
+  select id into v_existing_workspace_id
+  from public.mfa_workspaces
+  where owner_id = v_user_id
+  limit 1;
+
+  if v_existing_workspace_id is not null and v_existing_workspace_id <> v_workspace_id then
+    raise exception 'A different Neon workspace already exists for this account';
+  end if;
+
+  insert into public.mfa_app_users (user_id, email, created_at, last_seen_at)
+  values (v_user_id, v_email, now(), now())
+  on conflict (user_id) do update
+    set email = excluded.email,
+        last_seen_at = now();
+
+  insert into public.mfa_workspaces (id, owner_id, name, default_currency, upkeep_percentage, created_at)
+  select x.id, x.owner_id, x.name, x.default_currency, x.upkeep_percentage, x.created_at
+  from jsonb_to_recordset(coalesce(p_payload->'workspaces', '[]'::jsonb))
+    as x(id uuid, owner_id text, name text, default_currency text, upkeep_percentage numeric, created_at timestamptz)
+  where x.owner_id = v_user_id
+  on conflict (id) do update set
+    name = excluded.name,
+    default_currency = excluded.default_currency,
+    upkeep_percentage = excluded.upkeep_percentage;
+
+  insert into public.mfa_people (id, workspace_id, name, starting_balances, share_token, created_at)
+  select x.id, x.workspace_id, x.name, coalesce(x.starting_balances, '{}'::jsonb), x.share_token, x.created_at
+  from jsonb_to_recordset(coalesce(p_payload->'people', '[]'::jsonb))
+    as x(id uuid, workspace_id uuid, name text, starting_balances jsonb, share_token uuid, created_at timestamptz)
+  where x.workspace_id = v_workspace_id
+  on conflict (id) do update set
+    name = excluded.name,
+    starting_balances = excluded.starting_balances,
+    share_token = excluded.share_token;
+
+  insert into public.mfa_transactions (id, workspace_id, person_id, type, amount, currency, date, description, category, created_at)
+  select x.id, x.workspace_id, x.person_id, x.type, x.amount, x.currency, x.date, x.description, x.category, x.created_at
+  from jsonb_to_recordset(coalesce(p_payload->'transactions', '[]'::jsonb))
+    as x(id uuid, workspace_id uuid, person_id uuid, type text, amount numeric, currency text, date date, description text, category text, created_at timestamptz)
+  where x.workspace_id = v_workspace_id
+  on conflict (id) do update set
+    type = excluded.type,
+    amount = excluded.amount,
+    currency = excluded.currency,
+    date = excluded.date,
+    description = excluded.description,
+    category = excluded.category;
+
+  insert into public.mfa_monthly_budgets (id, workspace_id, person_id, currency, month, pv_limit, updated_at)
+  select x.id, x.workspace_id, x.person_id, x.currency, x.month, x.pv_limit, x.updated_at
+  from jsonb_to_recordset(coalesce(p_payload->'budgets', '[]'::jsonb))
+    as x(id uuid, workspace_id uuid, person_id uuid, currency text, month date, pv_limit numeric, updated_at timestamptz)
+  where x.workspace_id = v_workspace_id
+  on conflict (id) do update set
+    currency = excluded.currency,
+    month = excluded.month,
+    pv_limit = excluded.pv_limit,
+    updated_at = excluded.updated_at;
+
+  insert into public.mfa_goals (id, workspace_id, person_id, name, target_amount, reserved_amount, currency, target_date, status, created_at)
+  select x.id, x.workspace_id, x.person_id, x.name, x.target_amount, x.reserved_amount, x.currency, x.target_date, x.status, x.created_at
+  from jsonb_to_recordset(coalesce(p_payload->'goals', '[]'::jsonb))
+    as x(id uuid, workspace_id uuid, person_id uuid, name text, target_amount numeric, reserved_amount numeric, currency text, target_date date, status text, created_at timestamptz)
+  where x.workspace_id = v_workspace_id
+  on conflict (id) do update set
+    name = excluded.name,
+    target_amount = excluded.target_amount,
+    reserved_amount = excluded.reserved_amount,
+    currency = excluded.currency,
+    target_date = excluded.target_date,
+    status = excluded.status;
+
+  return jsonb_build_object(
+    'imported', true,
+    'workspace_id', v_workspace_id,
+    'people', jsonb_array_length(coalesce(p_payload->'people', '[]'::jsonb)),
+    'transactions', jsonb_array_length(coalesce(p_payload->'transactions', '[]'::jsonb))
+  );
+end;
+$;
+
+revoke all on function public.mfa_import_own_snapshot(jsonb) from public;
+grant execute on function public.mfa_import_own_snapshot(jsonb) to authenticated;
+
 create or replace function public.mfa_import_supabase_snapshot(p_payload jsonb)
 returns jsonb
 language plpgsql
