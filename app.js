@@ -2663,6 +2663,46 @@
     const form = event.target
     if (!(form instanceof HTMLFormElement)) return
 
+    if (form.id === 'invite-contributor-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        const invite = await createContributorInvite(values.person_id, values.email)
+        render()
+        const link = `${location.href.split('#')[0]}#/join/${invite.token}`
+        try { await navigator.clipboard.writeText(link) } catch {}
+        toast('Contributor invite created. The secure invite link has been copied when clipboard access is available.')
+      } catch (error) {
+        toast(error.message || 'Unable to create contributor invite.', 'danger')
+      } finally {
+        busy = false
+      }
+      return
+    }
+
+    if (form.id === 'contributor-request-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('contributor-request-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        values.date_unknown = form.querySelector('input[name="date_unknown"]')?.checked || false
+        if (values.request_id) await updateContributorRequest(values.request_id, values)
+        else await submitContributorRequest(values)
+        closeModal()
+        render()
+        toast(values.request_id ? 'Pending request updated.' : 'Request submitted for manager approval.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message || 'Unable to save request.')}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
+
     if (form.id === 'add-person-form') {
       event.preventDefault()
       if (busy) return
