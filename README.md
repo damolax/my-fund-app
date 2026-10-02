@@ -16,7 +16,7 @@ The browser never receives a Postgres password. Neon Auth protects the owner wor
 
 The workspace owner can:
 
-- add people whose money is being held
+- add people whose money is being held, with a notification email
 - record income and expenses directly
 - set starting balances
 - manage PV and Upkeep limits
@@ -25,6 +25,38 @@ The workspace owner can:
 - share each person's secure finance link
 - review pending record requests from those links
 - approve or reject every requested record
+
+## Person email notifications
+
+Every tracked person has an email attached to their fund profile.
+
+For new people, the email is required. Existing people without one can have it added from their person dashboard.
+
+Neon queues an email whenever an approved ledger record for that person is:
+
+- added by the owner
+- added after the owner approves the person's pending request
+- edited by the owner
+- deleted by the owner
+
+The email contains the record type, amount, description/date when available, and a link back to that person's secure finance page.
+
+The notification email is stored only on the owner-side person profile. It is deliberately removed from the public secure-link payload.
+
+Ledger notification delivery uses:
+
+```text
+api/person-ledger-email.js
+```
+
+and the same Vercel mail configuration:
+
+```text
+RESEND_API_KEY=<your Resend API key>
+MY_FUND_FROM_EMAIL=My Fund App <notifications@your-verified-domain.com>
+```
+
+If outbound mail is temporarily unavailable, Neon keeps the notification in `mfa_person_ledger_email_outbox` instead of losing the event.
 
 ## Secure person link
 
@@ -124,6 +156,7 @@ Approval support:
 - `mfa_record_requests`
 - `mfa_notifications`
 - `mfa_email_outbox`
+- `mfa_person_ledger_email_outbox`
 
 Older account-based approval tables/functions may remain in the schema for compatibility, but their authenticated RPC access is disabled and the application does not expose that workflow.
 

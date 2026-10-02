@@ -269,6 +269,23 @@
     }
   }
 
+  async function triggerLedgerEmail(transactionId, changeType) {
+    if (!transactionId || !changeType || !db?.auth) return
+    try {
+      const token = (await db.auth.getJWTToken?.()) || session?.access_token || null
+      if (!token) return
+      await fetch('/api/person-ledger-email', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ transaction_id: transactionId, change_type: changeType }),
+      })
+    } catch {
+      // The database outbox keeps the notification queued if immediate delivery fails.
+    }
+  }
   async function submitContributorRequest(values) {
     const result = await db.rpc('mfa_submit_record_request', {
       p_person_id: values.person_id,
@@ -316,6 +333,9 @@
       p_note: note || null,
     })
     if (result.error) throw result.error
+    if (decision === 'approve' && result.data?.recorded_transaction_id) {
+      await triggerLedgerEmail(result.data.recorded_transaction_id, 'created')
+    }
     await refreshCloud()
     return result.data
   }
@@ -739,9 +759,11 @@
     saveLocal()
   }
 
-  async function createPerson(name, startingCurrency = '', startingAmount = '') {
+  async function createPerson(name, email, startingCurrency = '', startingAmount = '') {
     const clean = String(name || '').trim()
+    const cleanEmail = String(email || '').trim().toLowerCase()
     if (!clean) throw new Error('Enter the person’s name.')
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Enter a valid email address for this person.')
     const currency = String(startingCurrency || state.workspace.default_currency || 'NGN').trim().toUpperCase()
     const hasStartingAmount = String(startingAmount ?? '').trim() !== ''
     const startingBalances = hasStartingAmount ? { [currency]: round(startingAmount) } : {}
@@ -750,6 +772,7 @@
         id: id(),
         workspace_id: state.workspace.id,
         name: clean,
+        email: cleanEmail,
         starting_balances: startingBalances,
         share_token: id(),
         created_at: new Date().toISOString(),
@@ -762,6 +785,7 @@
       .insert({
         workspace_id: state.workspace.id,
         name: clean,
+        email: cleanEmail,
         starting_balances: startingBalances,
       })
       .select('*')
@@ -769,6 +793,29 @@
     if (result.error) throw result.error
     await refreshCloud()
     return { ...result.data, starting_balances: result.data.starting_balances || {} }
+  }
+
+  async function updatePersonEmail(personId, email) {
+    const person = personById(personId)
+    if (!person) throw new Error('Person not found.')
+    const cleanEmail = String(email || '').trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Enter a valid email address.')
+
+    if (!CLOUD_ENABLED) {
+      await mutateLocal((draft) => {
+        draft.people = draft.people.map((item) =>
+          item.id === personId ? { ...item, email: cleanEmail } : item,
+        )
+      })
+      return
+    }
+
+    const result = await db
+      .from('mfa_people')
+      .update({ email: cleanEmail })
+      .eq('id', personId)
+    if (result.error) throw result.error
+    await refreshCloud()
   }
 
   async function updateStartingBalance(personId, currencyValue, amountValue) {
@@ -858,10 +905,12 @@
         description: payload.description,
         category: payload.category,
       })),
-    )
+    ).select('*')
     if (result.error) throw result.error
+    const created = result.data || []
+    await Promise.all(created.map((item) => triggerLedgerEmail(item.id, 'created')))
     await refreshCloud()
-    return result.data || payloads
+    return created.length ? created : payloads
   }
 
   async function addTransaction(values) {
@@ -912,6 +961,40 @@
     }
   }
 
+  async function updateTransaction(transactionId, values) {
+    const existing = state.transactions.find((item) => item.id === transactionId)
+    if (!existing) throw new Error('Record not found.')
+    const payload = normalizeTransactionValues({ ...values, person_id: existing.person_id })
+    if (!payload.amount || payload.amount <= 0) throw new Error('Amount must be greater than zero.')
+    if (!payload.description) throw new Error('Description is required.')
+    if (!/^[A-Z]{3}$/.test(payload.currency)) throw new Error('Use a valid three-letter currency code.')
+    if (payload.type === 'expense' && !EXPENSE_CATEGORIES.includes(payload.category)) {
+      throw new Error('Choose a valid expense category.')
+    }
+
+    if (!CLOUD_ENABLED) {
+      await mutateLocal((draft) => {
+        draft.transactions = draft.transactions.map((item) =>
+          item.id === transactionId ? { ...item, ...payload, id: transactionId, created_at: item.created_at } : item,
+        )
+      })
+      return
+    }
+
+    const result = await db.rpc('mfa_update_owner_transaction', {
+      p_transaction_id: transactionId,
+      p_transaction_type: payload.type,
+      p_amount: payload.amount,
+      p_currency: payload.currency,
+      p_date: payload.date,
+      p_description: payload.description,
+      p_category: payload.category,
+    })
+    if (result.error) throw result.error
+    await triggerLedgerEmail(transactionId, 'updated')
+    await refreshCloud()
+  }
+
   async function deleteTransaction(transactionId) {
     if (!CLOUD_ENABLED) {
       await mutateLocal((draft) => {
@@ -921,6 +1004,7 @@
     }
     const result = await db.from('mfa_transactions').delete().eq('id', transactionId)
     if (result.error) throw result.error
+    await triggerLedgerEmail(transactionId, 'deleted')
     await refreshCloud()
   }
 
@@ -1167,13 +1251,14 @@
       : '<div class="small-empty">No people added yet.</div>'
 
     const content = `
-      ${pageHeader('People', 'People whose funds you hold', 'Create a person using only their name, then enter all previous or new records from their page.')}
+      ${pageHeader('People', 'People whose funds you hold', 'Add each person with their email so they can receive ledger-change notifications and use their secure personal link.')}
       <section class="people-layout">
         <form class="panel add-person-card" id="add-person-form">
           <div class="section-icon">＋</div>
           <h2>Add a person</h2>
-          <p>Only the name is required. A starting balance is optional and can be updated later.</p>
+          <p>Name and email are required. The email receives alerts whenever an approved income or expense record is added, edited or removed.</p>
           <label class="field"><span>Name</span><input name="name" placeholder="Person's full name" required></label>
+          <label class="field"><span>Email for notifications</span><input name="email" type="email" placeholder="person@example.com" required></label>
           <div class="two-fields">
             <label class="field"><span>Starting balance (optional)</span><input name="starting_balance" type="number" step="0.01" placeholder="0.00"></label>
             <label class="field"><span>Currency</span><input name="starting_currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(state.workspace.default_currency)}">${currencyDatalist()}</label>
@@ -1251,6 +1336,8 @@
         <div class="stacked-panels">
           <div class="panel">
             ${panelHeading('Secure person link', 'View records and request new income or expenses')}
+            <div class="share-box"><span>✉</span><div><strong>${escapeHtml(person.email || 'No email attached')}</strong><span>${person.email ? 'Receives alerts when an approved income or expense is added, edited or removed.' : 'Add an email to enable ledger-change alerts.'}</span></div></div>
+            <button class="text-button" data-action="edit-person-email" data-person-id="${person.id}">✎ ${person.email ? 'Change notification email' : 'Add notification email'}</button>
             <div class="share-box"><span>🔗</span><div><strong>Personal finance link</strong><span>${CLOUD_ENABLED ? 'The person can view approved records and submit new records for your approval.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
             <div class="copy-row"><input readonly value="${escapeHtml(viewerLink)}"><button class="secondary-button" data-action="copy-link" data-link="${escapeHtml(viewerLink)}">⧉ Copy</button></div>
             <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace secure link</button><div class="helper-text">The link holder cannot edit or delete approved records. Only pending requests they submit can be changed or removed before you review them.</div>
@@ -1325,7 +1412,7 @@
               <span>${escapeHtml(person?.name || '')}${item.category ? ` · ${escapeHtml(item.category)}` : ''} · ${formatDate(item.date)}</span>
             </div>
             <strong class="${item.type === 'income' ? 'income-text' : ''}">${item.type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</strong>
-            ${allowDelete ? `<button class="icon-button mini delete-record" data-action="delete-transaction" data-transaction-id="${item.id}" title="Delete record">⌫</button>` : ''}
+            ${allowDelete ? `<div class="row-actions"><button class="icon-button mini" data-action="edit-transaction" data-transaction-id="${item.id}" title="Edit record">✎</button><button class="icon-button mini delete-record" data-action="delete-transaction" data-transaction-id="${item.id}" title="Delete record">⌫</button></div>` : ''}
           </div>`
       })
       .join('')}</div>`
@@ -2461,6 +2548,45 @@
     )
   }
 
+  function openPersonEmailModal(personId) {
+    const person = personById(personId)
+    if (!person) return
+    const body = `
+      <form class="modal-form" id="person-email-form">
+        <input type="hidden" name="person_id" value="${person.id}">
+        <label class="field"><span>Email for ledger notifications</span><input name="email" type="email" value="${escapeHtml(person.email || '')}" placeholder="person@example.com" required autofocus></label>
+        <div class="notice">This address receives an email whenever an approved income or expense record is added, edited or deleted for ${escapeHtml(person.name)}.</div>
+        <div id="person-email-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">✓ Save email</button></div>
+      </form>`
+    openModal(`Notification email for ${person.name}`, body)
+  }
+  function openEditTransactionModal(transactionId) {
+    const item = state.transactions.find((record) => record.id === transactionId)
+    if (!item) return
+    const person = personById(item.person_id)
+    const unknownDate = !item.date
+    const body = `
+      <form class="modal-form" id="edit-transaction-form">
+        <input type="hidden" name="transaction_id" value="${item.id}">
+        ${currencyDatalist()}
+        <div class="two-fields">
+          <label class="field"><span>Record type</span><select name="type"><option value="income" ${item.type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${item.type === 'expense' ? 'selected' : ''}>Expense</option></select></label>
+          <label class="field"><span>Amount</span><input name="amount" type="number" min="0.01" step="0.01" value="${item.amount}" required></label>
+        </div>
+        <div class="two-fields">
+          <label class="field"><span>Currency</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(item.currency)}" required></label>
+          <label class="field"><span>Date</span><input name="date" type="date" value="${unknownDate ? '' : escapeHtml(String(item.date).slice(0, 10))}" ${unknownDate ? 'disabled' : ''}></label>
+        </div>
+        <label class="checkbox-row"><input name="date_unknown" type="checkbox" data-action="toggle-edit-transaction-unknown-date" ${unknownDate ? 'checked' : ''}><span>Date unknown or not remembered</span></label>
+        <label class="field"><span>Expense category</span><select name="category">${EXPENSE_CATEGORIES.map((category) => `<option value="${category}" ${item.category === category ? 'selected' : ''}>${category}</option>`).join('')}</select><small>Ignored for Income.</small></label>
+        <label class="field"><span>Description</span><input name="description" value="${escapeHtml(item.description)}" required></label>
+        <div class="notice">Saving this change updates the approved ledger and sends ${escapeHtml(person?.email || 'the attached email')} a notification.</div>
+        <div id="edit-transaction-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">✓ Save record changes</button></div>
+      </form>`
+    openModal(`Edit ${item.type} for ${person?.name || 'person'}`, body)
+  }
   function openStartingBalanceModal(personId, currency) {
     const person = personById(personId)
     if (!person) return
@@ -2812,6 +2938,7 @@
         const values = new FormData(form)
         const person = await createPerson(
           values.get('name') || '',
+          values.get('email') || '',
           values.get('starting_currency') || state.workspace.default_currency,
           values.get('starting_balance'),
         )
@@ -2843,6 +2970,43 @@
       return
     }
 
+    if (form.id === 'person-email-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('person-email-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        await updatePersonEmail(values.person_id, values.email)
+        closeModal()
+        render()
+        toast('Notification email updated.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message)}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
+    if (form.id === 'edit-transaction-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('edit-transaction-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        values.date_unknown = form.querySelector('input[name="date_unknown"]')?.checked || false
+        await updateTransaction(values.transaction_id, values)
+        closeModal()
+        render()
+        toast('Record updated and notification queued.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message)}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
     if (form.id === 'starting-balance-form') {
       event.preventDefault()
       if (busy) return
@@ -3208,6 +3372,23 @@
     if (action === 'toggle-unknown-date') {
       const row = target.closest('.bulk-entry-row')
       const dateInput = row?.querySelector('[data-field="date"]')
+      if (dateInput) {
+        dateInput.disabled = target.checked
+        if (target.checked) dateInput.value = ''
+        else if (!dateInput.value) dateInput.value = today()
+      }
+      return
+    }
+    if (action === 'edit-person-email') {
+      openPersonEmailModal(target.dataset.personId)
+      return
+    }
+    if (action === 'edit-transaction') {
+      openEditTransactionModal(target.dataset.transactionId)
+      return
+    }
+    if (action === 'toggle-edit-transaction-unknown-date') {
+      const dateInput = target.closest('form')?.querySelector('input[name="date"]')
       if (dateInput) {
         dateInput.disabled = target.checked
         if (target.checked) dateInput.value = ''
