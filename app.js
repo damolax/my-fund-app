@@ -1363,18 +1363,68 @@
     const people = payload.people || []
     const transactions = payload.transactions || []
     const currencies = adminCurrenciesForPeople(people, payload)
+    const mainUser = users.find((user) => String(user.email || '').trim().toLowerCase() === ADMIN_EMAIL)
+    const sortedUsers = [...users].sort((a, b) => {
+      const aMain = String(a.email || '').trim().toLowerCase() === ADMIN_EMAIL ? 1 : 0
+      const bMain = String(b.email || '').trim().toLowerCase() === ADMIN_EMAIL ? 1 : 0
+      if (aMain !== bMain) return bMain - aMain
+      return String(b.last_seen_at || '').localeCompare(String(a.last_seen_at || ''))
+    })
 
-    const fundCards = currencies.length
-      ? currencies.map((currency) => {
-          const positions = people.map((person) => adminBalanceForPerson(person.id, currency, payload))
-          const positive = round(positions.reduce((sum, item) => sum + Math.max(item.balance, 0), 0))
-          const borrowed = round(positions.reduce((sum, item) => sum + Math.abs(Math.min(item.balance, 0)), 0))
-          return `<article class="admin-fund-card"><span>${currency}</span><strong>${money(positive - borrowed, currency)}</strong><small>${money(positive, currency)} positive · ${money(borrowed, currency)} borrowed</small></article>`
+    const currencyAnalysis = currencies.map((currency) => {
+      const positions = people.map((person) => adminBalanceForPerson(person.id, currency, payload))
+      const currentPositive = round(positions.reduce((sum, item) => sum + Math.max(item.balance, 0), 0))
+      const borrowed = round(positions.reduce((sum, item) => sum + Math.abs(Math.min(item.balance, 0)), 0))
+      const currentNet = round(currentPositive - borrowed)
+      const openingTracked = round(
+        people.reduce((sum, person) => sum + Math.max(num(person.starting_balances?.[currency]), 0), 0),
+      )
+      const incomeTracked = round(
+        transactions
+          .filter((item) => item.type === 'income' && item.currency === currency)
+          .reduce((sum, item) => sum + num(item.amount), 0),
+      )
+      const expenses = round(
+        transactions
+          .filter((item) => item.type === 'expense' && item.currency === currency)
+          .reduce((sum, item) => sum + num(item.amount), 0),
+      )
+      return {
+        currency,
+        totalTracked: round(openingTracked + incomeTracked),
+        expenses,
+        currentPositive,
+        borrowed,
+        currentNet,
+      }
+    })
+
+    const fundCards = currencyAnalysis.length
+      ? currencyAnalysis.map((item) => {
+          return `<article class="admin-fund-card">
+            <span>${item.currency}</span>
+            <strong>${money(item.currentNet, item.currency)}</strong>
+            <small>Currently held · ${money(item.totalTracked, item.currency)} tracked · ${money(item.expenses, item.currency)} spent · ${money(item.borrowed, item.currency)} borrowed</small>
+          </article>`
         }).join('')
       : '<div class="empty-inline">No starting balances or transactions have been recorded yet.</div>'
 
-    const accountPanels = users.length
-      ? users.map((user) => {
+    const trackedCards = currencyAnalysis.length
+      ? currencyAnalysis.map((item) => `<article class="admin-fund-card"><span>${item.currency} tracked</span><strong>${money(item.totalTracked, item.currency)}</strong><small>Opening positive balances + recorded income</small></article>`).join('')
+      : '<div class="empty-inline">No money has been tracked yet.</div>'
+
+    const mainWorkspace = mainUser ? workspaces.find((item) => item.owner_id === mainUser.user_id) : null
+    const mainPeople = mainWorkspace ? people.filter((item) => item.workspace_id === mainWorkspace.id) : []
+    const mainPersonIds = new Set(mainPeople.map((item) => item.id))
+    const mainTransactions = transactions.filter((item) => mainPersonIds.has(item.person_id))
+    const mainCurrencies = adminCurrenciesForPeople(mainPeople, payload)
+    const mainHoldings = mainCurrencies.map((currency) => {
+      const total = round(mainPeople.reduce((sum, person) => sum + adminBalanceForPerson(person.id, currency, payload).balance, 0))
+      return `<span class="balance-pill ${total < 0 ? 'negative-pill' : ''}">${money(total, currency)}</span>`
+    }).join('') || '<span class="muted-text">No funds recorded</span>'
+
+    const accountPanels = sortedUsers.length
+      ? sortedUsers.map((user) => {
           const workspace = workspaces.find((item) => item.owner_id === user.user_id)
           const accountPeople = workspace ? people.filter((item) => item.workspace_id === workspace.id) : []
           const personIds = new Set(accountPeople.map((item) => item.id))
@@ -1398,9 +1448,10 @@
                 return `<tr><td><strong>${escapeHtml(person.name)}</strong></td><td>${balances}</td><td>${accountTransactions.filter((item) => item.person_id === person.id).length}</td><td>${formatTimestamp(person.created_at)}</td></tr>`
               }).join('')
             : '<tr><td colspan="4" class="empty-cell">This account has not added anyone yet.</td></tr>'
+          const isMainAccount = String(user.email || '').trim().toLowerCase() === ADMIN_EMAIL
           return `<article class="panel admin-account-card">
             <div class="admin-account-head">
-              <div><span class="eyebrow">Account</span><h2>${escapeHtml(user.email || 'Unknown email')}</h2><p>${escapeHtml(workspace?.name || 'Workspace not created yet')}</p></div>
+              <div><span class="eyebrow">${isMainAccount ? 'Main account · Administrator' : 'Account'}</span><h2>${escapeHtml(user.email || 'Unknown email')}</h2><p>${escapeHtml(workspace?.name || 'Workspace not created yet')}</p></div>
               <div class="admin-account-totals">${accountTotals}</div>
             </div>
             <div class="admin-meta-grid">
@@ -1417,12 +1468,28 @@
     const content = `
       ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<div class="button-row"><button class="secondary-button" data-action="migrate-supabase">⇄ Import Supabase data</button><button class="secondary-button" data-action="refresh-admin">↻ Refresh</button></div>')}
       <section class="summary-grid admin-summary-grid">
-        ${summaryCard('App accounts', String(users.length), '◎', 'Only users who opened My Fund App')}
-        ${summaryCard('Tracked people', String(people.length), '◉', 'Across every My Fund App workspace')}
-        ${summaryCard('Transactions', String(transactions.length), '≡', 'Income and expenses recorded')}
-        ${summaryCard('Administrator', ADMIN_EMAIL, '◆', 'Platform-wide read-only access')}
+        ${summaryCard('Accounts using app', String(users.length), '◎', 'Registered My Fund App accounts')}
+        ${summaryCard('People being tracked', String(people.length), '◉', 'Across every account')}
+        ${summaryCard('Total records', String(transactions.length), '≡', 'Income and expense records')}
+        ${summaryCard('Main account', mainUser ? ADMIN_EMAIL : 'Not used yet', '◆', mainUser ? `${mainPeople.length} people · ${mainTransactions.length} records` : 'Administrator has not created a workspace yet')}
       </section>
-      <section class="panel"><div class="panel-heading"><div><h2>Net funds across all accounts</h2><p>Negative balances are deducted from positive balances. Currencies remain separate.</p></div></div><div class="admin-funds-grid">${fundCards}</div></section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Platform analysis</h2><p>Total tracked is positive opening balances plus recorded income. Current holdings are what remains after expenses, with borrowed balances shown separately.</p></div></div>
+        <div class="admin-funds-grid">${fundCards}</div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Total money tracked</h2><p>Gross money entered into My Fund App, kept separate by currency.</p></div></div>
+        <div class="admin-funds-grid">${trackedCards}</div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Main account</h2><p>${escapeHtml(ADMIN_EMAIL)} · your administrator workspace and current holdings.</p></div></div>
+        <div class="admin-meta-grid">
+          <span><strong>${mainPeople.length}</strong> tracked people</span>
+          <span><strong>${mainTransactions.length}</strong> records</span>
+          <span><strong>${mainWorkspace ? 'Active' : 'Not created'}</strong> workspace</span>
+          <span>${mainHoldings}</span>
+        </div>
+      </section>
       <section class="admin-account-list">${accountPanels}</section>`
     return shell(content, 'admin')
   }
