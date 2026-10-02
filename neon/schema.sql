@@ -900,8 +900,10 @@ begin
   returning * into v_request;
 
   update public.mfa_notifications
-  set body = public.mfa_current_email() || ' updated a pending request: ' ||
-      v_request.currency || ' ' || v_request.amount::text || '.'
+  set title = 'Record request updated',
+      body = public.mfa_current_email() || ' updated a pending request: ' ||
+        v_request.currency || ' ' || v_request.amount::text || '.',
+      is_read = false
   where request_id = v_request.id
     and kind = 'record_request';
 
