@@ -1412,7 +1412,7 @@
               <span>${escapeHtml(person?.name || '')}${item.category ? ` · ${escapeHtml(item.category)}` : ''} · ${formatDate(item.date)}</span>
             </div>
             <strong class="${item.type === 'income' ? 'income-text' : ''}">${item.type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</strong>
-            ${allowDelete ? `<button class="icon-button mini delete-record" data-action="delete-transaction" data-transaction-id="${item.id}" title="Delete record">⌫</button>` : ''}
+            ${allowDelete ? `<div class="row-actions"><button class="icon-button mini" data-action="edit-transaction" data-transaction-id="${item.id}" title="Edit record">✎</button><button class="icon-button mini delete-record" data-action="delete-transaction" data-transaction-id="${item.id}" title="Delete record">⌫</button></div>` : ''}
           </div>`
       })
       .join('')}</div>`
@@ -2560,6 +2560,32 @@
         <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">✓ Save email</button></div>
       </form>`
     openModal(`Notification email for ${person.name}`, body)
+  }
+  function openEditTransactionModal(transactionId) {
+    const item = state.transactions.find((record) => record.id === transactionId)
+    if (!item) return
+    const person = personById(item.person_id)
+    const unknownDate = !item.date
+    const body = `
+      <form class="modal-form" id="edit-transaction-form">
+        <input type="hidden" name="transaction_id" value="${item.id}">
+        ${currencyDatalist()}
+        <div class="two-fields">
+          <label class="field"><span>Record type</span><select name="type"><option value="income" ${item.type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${item.type === 'expense' ? 'selected' : ''}>Expense</option></select></label>
+          <label class="field"><span>Amount</span><input name="amount" type="number" min="0.01" step="0.01" value="${item.amount}" required></label>
+        </div>
+        <div class="two-fields">
+          <label class="field"><span>Currency</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(item.currency)}" required></label>
+          <label class="field"><span>Date</span><input name="date" type="date" value="${unknownDate ? '' : escapeHtml(String(item.date).slice(0, 10))}" ${unknownDate ? 'disabled' : ''}></label>
+        </div>
+        <label class="checkbox-row"><input name="date_unknown" type="checkbox" data-action="toggle-edit-transaction-unknown-date" ${unknownDate ? 'checked' : ''}><span>Date unknown or not remembered</span></label>
+        <label class="field"><span>Expense category</span><select name="category">${EXPENSE_CATEGORIES.map((category) => `<option value="${category}" ${item.category === category ? 'selected' : ''}>${category}</option>`).join('')}</select><small>Ignored for Income.</small></label>
+        <label class="field"><span>Description</span><input name="description" value="${escapeHtml(item.description)}" required></label>
+        <div class="notice">Saving this change updates the approved ledger and sends ${escapeHtml(person?.email || 'the attached email')} a notification.</div>
+        <div id="edit-transaction-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">✓ Save record changes</button></div>
+      </form>`
+    openModal(`Edit ${item.type} for ${person?.name || 'person'}`, body)
   }
   function openStartingBalanceModal(personId, currency) {
     const person = personById(personId)
