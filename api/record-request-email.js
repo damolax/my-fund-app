@@ -1,4 +1,4 @@
-const DATA_API_URL = 'https://ep-cool-lake-b5w5dfc2.apirest.c-7.us-east-2.aws.neon.tech/my_fund_app/rest/v1'
+const DATA_API_URL = process.env.MY_FUND_DATA_API_URL || 'https://ep-cool-lake-b5w5dfc2.apirest.c-7.us-east-2.aws.neon.tech/my_fund_app/rest/v1'
 
 async function rpc(name, payload, authorization) {
   const response = await fetch(`${DATA_API_URL}/rpc/${name}`, {
