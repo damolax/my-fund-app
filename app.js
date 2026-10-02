@@ -2548,6 +2548,19 @@
     )
   }
 
+  function openPersonEmailModal(personId) {
+    const person = personById(personId)
+    if (!person) return
+    const body = `
+      <form class="modal-form" id="person-email-form">
+        <input type="hidden" name="person_id" value="${person.id}">
+        <label class="field"><span>Email for ledger notifications</span><input name="email" type="email" value="${escapeHtml(person.email || '')}" placeholder="person@example.com" required autofocus></label>
+        <div class="notice">This address receives an email whenever an approved income or expense record is added, edited or deleted for ${escapeHtml(person.name)}.</div>
+        <div id="person-email-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">✓ Save email</button></div>
+      </form>`
+    openModal(`Notification email for ${person.name}`, body)
+  }
   function openStartingBalanceModal(personId, currency) {
     const person = personById(personId)
     if (!person) return
@@ -2899,6 +2912,7 @@
         const values = new FormData(form)
         const person = await createPerson(
           values.get('name') || '',
+          values.get('email') || '',
           values.get('starting_currency') || state.workspace.default_currency,
           values.get('starting_balance'),
         )
@@ -2930,6 +2944,24 @@
       return
     }
 
+    if (form.id === 'person-email-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('person-email-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        await updatePersonEmail(values.person_id, values.email)
+        closeModal()
+        render()
+        toast('Notification email updated.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message)}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
     if (form.id === 'starting-balance-form') {
       event.preventDefault()
       if (busy) return
@@ -3300,6 +3332,10 @@
         if (target.checked) dateInput.value = ''
         else if (!dateInput.value) dateInput.value = today()
       }
+      return
+    }
+    if (action === 'edit-person-email') {
+      openPersonEmailModal(target.dataset.personId)
       return
     }
     if (action === 'edit-starting-balance') {
