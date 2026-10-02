@@ -2914,6 +2914,127 @@
       renderAuth()
       return
     }
+    if (action === 'accept-invite') {
+      if (busy) return
+      busy = true
+      try {
+        await acceptContributorInvite(target.dataset.token)
+        go('/contributor')
+        render()
+        toast('Contributor access activated.')
+      } catch (error) {
+        toast(error.message || 'Unable to accept this invite.', 'danger')
+      } finally {
+        busy = false
+      }
+      return
+    }
+    if (action === 'toggle-contributor') {
+      if (busy) return
+      busy = true
+      try {
+        await setContributorStatus(target.dataset.memberId, target.dataset.status)
+        render()
+        toast(target.dataset.status === 'active' ? 'Contributor access enabled.' : 'Contributor access disabled.')
+      } catch (error) {
+        toast(error.message || 'Unable to update contributor access.', 'danger')
+      } finally {
+        busy = false
+      }
+      return
+    }
+    if (action === 'revoke-invite') {
+      if (!confirm('Revoke this contributor invite?')) return
+      try {
+        await revokeContributorInvite(target.dataset.inviteId)
+        render()
+        toast('Invite revoked.')
+      } catch (error) {
+        toast(error.message || 'Unable to revoke invite.', 'danger')
+      }
+      return
+    }
+    if (action === 'open-request') {
+      openContributorRequestModal({ type: target.dataset.type || 'income' })
+      return
+    }
+    if (action === 'request-update') {
+      openContributorRequestModal({ transactionId: target.dataset.transactionId })
+      return
+    }
+    if (action === 'edit-request') {
+      openContributorRequestModal({ requestId: target.dataset.requestId })
+      return
+    }
+    if (action === 'delete-request') {
+      if (!confirm('Delete this pending request?')) return
+      try {
+        await deleteContributorRequest(target.dataset.requestId)
+        render()
+        toast('Pending request deleted.')
+      } catch (error) {
+        toast(error.message || 'Unable to delete request.', 'danger')
+      }
+      return
+    }
+    if (action === 'approve-request') {
+      const note = prompt('Optional note for the contributor:', '')
+      if (note === null) return
+      if (!confirm('Approve this request and write it to the real ledger?')) return
+      try {
+        await reviewRecordRequest(target.dataset.requestId, 'approve', note)
+        render()
+        toast('Request approved and recorded.')
+      } catch (error) {
+        toast(error.message || 'Unable to approve request.', 'danger')
+      }
+      return
+    }
+    if (action === 'reject-request') {
+      const note = prompt('Reason for rejection (optional):', '')
+      if (note === null) return
+      try {
+        await reviewRecordRequest(target.dataset.requestId, 'reject', note)
+        render()
+        toast('Request rejected. The ledger was not changed.')
+      } catch (error) {
+        toast(error.message || 'Unable to reject request.', 'danger')
+      }
+      return
+    }
+    if (action === 'refresh-approvals') {
+      approvalLoading = true
+      approvalError = ''
+      try {
+        await refreshApprovalCenter()
+        render()
+        toast('Approval queue refreshed.')
+      } catch (error) {
+        approvalError = error.message || 'Unable to refresh approvals.'
+        render()
+      } finally {
+        approvalLoading = false
+      }
+      return
+    }
+    if (action === 'read-notification') {
+      try {
+        await markNotificationRead(target.dataset.notificationId)
+        render()
+      } catch (error) {
+        toast(error.message || 'Unable to update notification.', 'danger')
+      }
+      return
+    }
+    if (action === 'toggle-request-unknown-date') {
+      const dateInput = target.closest('form')?.querySelector('input[name="date"]')
+      if (dateInput) {
+        dateInput.disabled = target.checked
+        if (target.checked) dateInput.value = ''
+        else if (!dateInput.value) dateInput.value = today()
+      }
+      return
+    }
     if (action === 'refresh-admin') {
       if (!isPlatformAdmin()) return
       adminLoading = true
@@ -3016,12 +3137,12 @@
     if (action === 'copy-link') {
       try {
         await navigator.clipboard.writeText(target.dataset.link)
-        toast('Viewer link copied.')
+        toast('Link copied.')
       } catch {
         const input = target.parentElement?.querySelector('input')
         input?.select()
         document.execCommand('copy')
-        toast('Viewer link copied.')
+        toast('Link copied.')
       }
       return
     }
@@ -3106,6 +3227,9 @@
     }
     if (action === 'signout') {
       adminState = null
+      approvalState = { requests: [], notifications: [], members: [], invites: [] }
+      contributorState = null
+      accessContext = null
       await authDb.auth.signOut()
       return
     }
