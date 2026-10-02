@@ -685,6 +685,94 @@ $mfa$;
 revoke all on function public.mfa_delete_record_request(uuid) from public;
 grant execute on function public.mfa_delete_record_request(uuid) to authenticated;
 
+create or replace function public.mfa_validate_month_limits(
+  p_workspace_id uuid,
+  p_person_id uuid,
+  p_currency text,
+  p_month date
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $mfa$
+declare
+  v_month date := date_trunc('month', p_month)::date;
+  v_pv_limit numeric(18,2) := 0;
+  v_pv_spent numeric(18,2) := 0;
+  v_upkeep_percentage numeric(7,2) := 0;
+  v_month_income numeric(18,2) := 0;
+  v_upkeep_spent numeric(18,2) := 0;
+  v_upkeep_limit numeric(18,2) := 0;
+begin
+  if p_month is null then return; end if;
+
+  select coalesce(b.pv_limit, 0)
+  into v_pv_limit
+  from public.mfa_monthly_budgets b
+  where b.workspace_id = p_workspace_id
+    and b.person_id = p_person_id
+    and b.currency = upper(trim(p_currency))
+    and b.month = v_month;
+
+  v_pv_limit := coalesce(v_pv_limit, 0);
+
+  select coalesce(sum(t.amount), 0)
+  into v_pv_spent
+  from public.mfa_transactions t
+  where t.workspace_id = p_workspace_id
+    and t.person_id = p_person_id
+    and t.currency = upper(trim(p_currency))
+    and t.type = 'expense'
+    and t.category = 'PV'
+    and t.date >= v_month
+    and t.date < (v_month + interval '1 month')::date;
+
+  if v_pv_spent > v_pv_limit + 0.00001 then
+    raise exception 'Approval would exceed the PV monthly limit by % %',
+      upper(trim(p_currency)),
+      round(v_pv_spent - v_pv_limit, 2);
+  end if;
+
+  select coalesce(w.upkeep_percentage, 0)
+  into v_upkeep_percentage
+  from public.mfa_workspaces w
+  where w.id = p_workspace_id;
+
+  select coalesce(sum(t.amount), 0)
+  into v_month_income
+  from public.mfa_transactions t
+  where t.workspace_id = p_workspace_id
+    and t.person_id = p_person_id
+    and t.currency = upper(trim(p_currency))
+    and t.type = 'income'
+    and t.date >= v_month
+    and t.date < (v_month + interval '1 month')::date;
+
+  select coalesce(sum(t.amount), 0)
+  into v_upkeep_spent
+  from public.mfa_transactions t
+  where t.workspace_id = p_workspace_id
+    and t.person_id = p_person_id
+    and t.currency = upper(trim(p_currency))
+    and t.type = 'expense'
+    and t.category = 'Upkeep'
+    and t.date >= v_month
+    and t.date < (v_month + interval '1 month')::date;
+
+  v_upkeep_limit := round(v_month_income * (v_upkeep_percentage / 100), 2);
+
+  if v_upkeep_spent > v_upkeep_limit + 0.00001 then
+    raise exception 'Approval would exceed the Upkeep monthly limit by % %',
+      upper(trim(p_currency)),
+      round(v_upkeep_spent - v_upkeep_limit, 2);
+  end if;
+end;
+$mfa$;
+
+revoke all on function public.mfa_validate_month_limits(uuid, uuid, text, date) from public;
+grant execute on function public.mfa_validate_month_limits(uuid, uuid, text, date) to authenticated;
+
 create or replace function public.mfa_review_record_request(
   p_request_id uuid,
   p_decision text,
@@ -698,6 +786,7 @@ as $mfa$
 declare
   v_uid text := (select auth.user_id());
   v_request public.mfa_record_requests%rowtype;
+  v_original public.mfa_transactions%rowtype;
   v_record_id uuid;
 begin
   if p_decision not in ('approve', 'reject') then
@@ -715,6 +804,19 @@ begin
   if v_request.status <> 'pending' then raise exception 'This request has already been reviewed'; end if;
 
   if p_decision = 'approve' then
+    if v_request.request_action = 'update' then
+      select * into v_original
+      from public.mfa_transactions
+      where id = v_request.target_transaction_id
+        and workspace_id = v_request.workspace_id
+        and person_id = v_request.person_id
+      for update;
+
+      if not found then
+        raise exception 'The original record could not be found';
+      end if;
+    end if;
+
     if v_request.request_action = 'create' then
       insert into public.mfa_transactions (
         workspace_id, person_id, type, amount, currency, date, description, category
@@ -741,6 +843,31 @@ begin
       if v_record_id is null then
         raise exception 'The original record could not be found';
       end if;
+    end if;
+
+    if v_request.date is not null then
+      perform public.mfa_validate_month_limits(
+        v_request.workspace_id,
+        v_request.person_id,
+        v_request.currency,
+        v_request.date
+      );
+    end if;
+
+    if v_request.request_action = 'update'
+      and v_original.date is not null
+      and (
+        v_original.currency <> v_request.currency
+        or date_trunc('month', v_original.date)::date <> date_trunc('month', v_request.date)::date
+        or v_request.date is null
+      )
+    then
+      perform public.mfa_validate_month_limits(
+        v_original.workspace_id,
+        v_original.person_id,
+        v_original.currency,
+        v_original.date
+      );
     end if;
 
     update public.mfa_record_requests
