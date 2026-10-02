@@ -962,13 +962,15 @@ declare
 begin
   if coalesce(v_uid, '') = '' then raise exception 'Authentication required'; end if;
 
-  select r.*, w.owner_id
-  into v_request, v_owner_id
+  select r.* into v_request
   from public.mfa_record_requests r
-  join public.mfa_workspaces w on w.id = r.workspace_id
   where r.id = p_request_id;
 
   if not found then return jsonb_build_object('status', 'none'); end if;
+
+  select w.owner_id into v_owner_id
+  from public.mfa_workspaces w
+  where w.id = v_request.workspace_id;
 
   if v_uid <> v_request.submitted_by_user_id and v_uid <> v_owner_id then
     raise exception 'Access denied';
@@ -1035,15 +1037,19 @@ declare
 begin
   if coalesce(v_uid, '') = '' then raise exception 'Authentication required'; end if;
 
-  select o.*, r.submitted_by_user_id, w.owner_id
-  into v_outbox, v_submitter, v_owner
+  select o.* into v_outbox
   from public.mfa_email_outbox o
-  join public.mfa_record_requests r on r.id = o.request_id
-  join public.mfa_workspaces w on w.id = o.workspace_id
   where o.id = p_outbox_id
-  for update of o;
+  for update;
 
   if not found then raise exception 'Email outbox item not found'; end if;
+
+  select r.submitted_by_user_id, w.owner_id
+  into v_submitter, v_owner
+  from public.mfa_record_requests r
+  join public.mfa_workspaces w on w.id = r.workspace_id
+  where r.id = v_outbox.request_id;
+
   if v_uid <> v_submitter and v_uid <> v_owner then raise exception 'Access denied'; end if;
 
   update public.mfa_email_outbox
