@@ -483,6 +483,42 @@
       <div id="modal-root"></div>`
   }
 
+  async function migrateSignedInUserFromSupabase() {
+    if (!authDb || !db || !session?.user) return null
+
+    const sourceWorkspaceResult = await authDb
+      .from('mfa_workspaces')
+      .select('*')
+      .eq('owner_id', session.user.id)
+      .maybeSingle()
+    if (sourceWorkspaceResult.error) throw sourceWorkspaceResult.error
+    const sourceWorkspace = sourceWorkspaceResult.data
+    if (!sourceWorkspace) return null
+
+    const [peopleResult, transactionResult, budgetResult, goalResult] = await Promise.all([
+      authDb.from('mfa_people').select('*').eq('workspace_id', sourceWorkspace.id),
+      authDb.from('mfa_transactions').select('*').eq('workspace_id', sourceWorkspace.id),
+      authDb.from('mfa_monthly_budgets').select('*').eq('workspace_id', sourceWorkspace.id),
+      authDb.from('mfa_goals').select('*').eq('workspace_id', sourceWorkspace.id),
+    ])
+
+    for (const result of [peopleResult, transactionResult, budgetResult, goalResult]) {
+      if (result.error) throw result.error
+    }
+
+    const imported = await db.rpc('mfa_import_own_snapshot', {
+      p_payload: {
+        workspaces: [sourceWorkspace],
+        people: peopleResult.data || [],
+        transactions: transactionResult.data || [],
+        budgets: budgetResult.data || [],
+        goals: goalResult.data || [],
+      },
+    })
+    if (imported.error) throw imported.error
+    return imported.data || null
+  }
+
   async function refreshCloud() {
     if (!CLOUD_ENABLED || !session?.user) return
     try {
@@ -493,6 +529,19 @@
         .maybeSingle()
       if (workspaceResult.error) throw workspaceResult.error
       let workspace = workspaceResult.data
+      if (!workspace) {
+        const migrated = await migrateSignedInUserFromSupabase()
+        if (migrated?.imported) {
+          workspaceResult = await db
+            .from('mfa_workspaces')
+            .select('*')
+            .eq('owner_id', session.user.id)
+            .maybeSingle()
+          if (workspaceResult.error) throw workspaceResult.error
+          workspace = workspaceResult.data
+        }
+      }
+
       if (!workspace) {
         const created = await db
           .from('mfa_workspaces')
