@@ -116,6 +116,9 @@ create table if not exists public.mfa_email_outbox (
 create index if not exists mfa_email_outbox_status_idx
   on public.mfa_email_outbox(status, created_at);
 
+alter table public.mfa_email_outbox
+  add column if not exists last_attempt_at timestamptz;
+
 alter table public.mfa_workspace_members enable row level security;
 alter table public.mfa_member_invites enable row level security;
 alter table public.mfa_record_requests enable row level security;
@@ -944,6 +947,115 @@ $mfa$;
 
 revoke all on function public.mfa_mark_notification_read(uuid) from public;
 grant execute on function public.mfa_mark_notification_read(uuid) to authenticated;
+
+create or replace function public.mfa_claim_request_email(p_request_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $mfa$
+declare
+  v_uid text := (select auth.user_id());
+  v_request public.mfa_record_requests%rowtype;
+  v_owner_id text;
+  v_outbox public.mfa_email_outbox%rowtype;
+begin
+  if coalesce(v_uid, '') = '' then raise exception 'Authentication required'; end if;
+
+  select r.*, w.owner_id
+  into v_request, v_owner_id
+  from public.mfa_record_requests r
+  join public.mfa_workspaces w on w.id = r.workspace_id
+  where r.id = p_request_id;
+
+  if not found then return jsonb_build_object('status', 'none'); end if;
+
+  if v_uid <> v_request.submitted_by_user_id and v_uid <> v_owner_id then
+    raise exception 'Access denied';
+  end if;
+
+  select * into v_outbox
+  from public.mfa_email_outbox
+  where request_id = p_request_id
+  order by created_at desc
+  limit 1
+  for update;
+
+  if not found then return jsonb_build_object('status', 'none'); end if;
+  if v_outbox.status = 'sent' then
+    return jsonb_build_object('status', 'sent');
+  end if;
+  if v_outbox.status = 'sending'
+    and v_outbox.last_attempt_at is not null
+    and v_outbox.last_attempt_at > now() - interval '10 minutes'
+  then
+    return jsonb_build_object('status', 'busy');
+  end if;
+  if v_outbox.attempts >= 5 then
+    return jsonb_build_object('status', 'failed', 'reason', 'attempt_limit');
+  end if;
+
+  update public.mfa_email_outbox
+  set status = 'sending',
+      attempts = attempts + 1,
+      last_attempt_at = now(),
+      last_error = null
+  where id = v_outbox.id
+  returning * into v_outbox;
+
+  return jsonb_build_object(
+    'status', 'ready',
+    'outbox_id', v_outbox.id,
+    'recipient_email', v_outbox.recipient_email,
+    'subject', v_outbox.subject,
+    'html_body', v_outbox.html_body,
+    'deep_link', v_outbox.deep_link
+  );
+end;
+$mfa$;
+
+revoke all on function public.mfa_claim_request_email(uuid) from public;
+grant execute on function public.mfa_claim_request_email(uuid) to authenticated;
+
+create or replace function public.mfa_complete_request_email(
+  p_outbox_id uuid,
+  p_success boolean,
+  p_error text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $mfa$
+declare
+  v_uid text := (select auth.user_id());
+  v_outbox public.mfa_email_outbox%rowtype;
+  v_submitter text;
+  v_owner text;
+begin
+  if coalesce(v_uid, '') = '' then raise exception 'Authentication required'; end if;
+
+  select o.*, r.submitted_by_user_id, w.owner_id
+  into v_outbox, v_submitter, v_owner
+  from public.mfa_email_outbox o
+  join public.mfa_record_requests r on r.id = o.request_id
+  join public.mfa_workspaces w on w.id = o.workspace_id
+  where o.id = p_outbox_id
+  for update of o;
+
+  if not found then raise exception 'Email outbox item not found'; end if;
+  if v_uid <> v_submitter and v_uid <> v_owner then raise exception 'Access denied'; end if;
+
+  update public.mfa_email_outbox
+  set status = case when p_success then 'sent' else 'failed' end,
+      sent_at = case when p_success then now() else null end,
+      last_error = case when p_success then null else left(coalesce(p_error, 'Delivery failed'), 1000) end
+  where id = p_outbox_id;
+end;
+$mfa$;
+
+revoke all on function public.mfa_complete_request_email(uuid, boolean, text) from public;
+grant execute on function public.mfa_complete_request_email(uuid, boolean, text) to authenticated;
 
 create or replace function public.mfa_set_member_status(
   p_member_id uuid,
