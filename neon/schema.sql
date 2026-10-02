@@ -1994,3 +1994,44 @@ $mfa$;
 
 revoke all on function public.mfa_complete_public_request_email(uuid, uuid, boolean, text) from public;
 grant execute on function public.mfa_complete_public_request_email(uuid, uuid, boolean, text) to anonymous, authenticated;
+
+
+-- Disable the superseded account-based contributor workflow.
+create or replace function public.mfa_get_access_context()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $mfa$
+declare
+  v_uid text := (select auth.user_id());
+  v_workspace public.mfa_workspaces%rowtype;
+begin
+  if coalesce(v_uid, '') = '' then
+    raise exception 'Authentication required';
+  end if;
+
+  select * into v_workspace
+  from public.mfa_workspaces
+  where owner_id = v_uid
+  limit 1;
+
+  if found then
+    return jsonb_build_object('role', 'owner', 'workspace', to_jsonb(v_workspace));
+  end if;
+
+  return null;
+end;
+$mfa$;
+
+revoke all on function public.mfa_get_access_context() from public;
+grant execute on function public.mfa_get_access_context() to authenticated;
+
+revoke execute on function public.mfa_create_member_invite(uuid, text) from authenticated;
+revoke execute on function public.mfa_revoke_member_invite(uuid) from authenticated;
+revoke execute on function public.mfa_accept_member_invite(uuid) from authenticated;
+revoke execute on function public.mfa_get_contributor_dashboard() from authenticated;
+revoke execute on function public.mfa_submit_record_request(uuid, text, uuid, text, numeric, text, date, text, text) from authenticated;
+revoke execute on function public.mfa_update_record_request(uuid, text, numeric, text, date, text, text) from authenticated;
+revoke execute on function public.mfa_delete_record_request(uuid) from authenticated;
+revoke execute on function public.mfa_set_member_status(uuid, text) from authenticated;
