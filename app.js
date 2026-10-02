@@ -2324,6 +2324,62 @@
     renumberTransactionRows()
   }
 
+  function openContributorRequestModal(options = {}) {
+    const person = contributorState?.person
+    if (!person) return
+
+    const existingRequest = options.requestId
+      ? (contributorState?.requests || []).find((item) => item.id === options.requestId)
+      : null
+    const targetTransaction = options.transactionId
+      ? state.transactions.find((item) => item.id === options.transactionId)
+      : existingRequest?.target_transaction_id
+        ? state.transactions.find((item) => item.id === existingRequest.target_transaction_id)
+        : null
+
+    const seed = existingRequest || targetTransaction || {}
+    const requestAction = existingRequest?.request_action || (targetTransaction ? 'update' : 'create')
+    const type = existingRequest?.transaction_type || targetTransaction?.type || options.type || 'income'
+    const amount = seed.amount ?? ''
+    const currency = seed.currency || state.workspace.default_currency
+    const date = seed.date ? String(seed.date).slice(0, 10) : today()
+    const unknownDate = !seed.date && Boolean(existingRequest || targetTransaction)
+    const description = seed.description || ''
+    const category = seed.category || 'Other'
+
+    const body = `
+      <form class="modal-form" id="contributor-request-form">
+        <input type="hidden" name="request_id" value="${escapeHtml(existingRequest?.id || '')}">
+        <input type="hidden" name="person_id" value="${escapeHtml(person.id)}">
+        <input type="hidden" name="request_action" value="${escapeHtml(requestAction)}">
+        <input type="hidden" name="target_transaction_id" value="${escapeHtml(targetTransaction?.id || existingRequest?.target_transaction_id || '')}">
+        ${currencyDatalist()}
+        <div class="two-fields">
+          <label class="field"><span>Record type</span><select name="type"><option value="income" ${type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${type === 'expense' ? 'selected' : ''}>Expense</option></select></label>
+          <label class="field"><span>Amount</span><input name="amount" type="number" min="0.01" step="0.01" value="${escapeHtml(amount)}" required></label>
+        </div>
+        <div class="two-fields">
+          <label class="field"><span>Currency</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(currency)}" required></label>
+          <label class="field"><span>Date</span><input name="date" type="date" value="${unknownDate ? '' : escapeHtml(date)}" ${unknownDate ? 'disabled' : ''}></label>
+        </div>
+        <label class="checkbox-row"><input name="date_unknown" type="checkbox" data-action="toggle-request-unknown-date" ${unknownDate ? 'checked' : ''}><span>Date unknown or not remembered</span></label>
+        <label class="field"><span>Expense category</span><select name="category">${EXPENSE_CATEGORIES.map((item) => `<option value="${item}" ${item === category ? 'selected' : ''}>${item}</option>`).join('')}</select><small>Ignored when the record type is Income.</small></label>
+        <label class="field"><span>Description</span><input name="description" value="${escapeHtml(description)}" placeholder="What is this record for?" required></label>
+        <div class="notice">${requestAction === 'update' ? 'This requests a correction to an approved record. The original record stays unchanged until the manager approves the update.' : 'This stays pending and does not affect your balance until the manager approves it.'}</div>
+        <div id="contributor-request-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">${existingRequest ? 'Save pending request' : 'Submit for approval'}</button></div>
+      </form>`
+
+    openModal(
+      existingRequest
+        ? 'Edit pending request'
+        : requestAction === 'update'
+          ? 'Request a record update'
+          : 'Submit a new record',
+      body,
+    )
+  }
+
   function openStartingBalanceModal(personId, currency) {
     const person = personById(personId)
     if (!person) return
