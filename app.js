@@ -250,18 +250,20 @@
   }
 
   async function triggerRequestEmail(requestId) {
-    if (!requestId || !session?.access_token) return
+    if (!requestId || !db?.auth) return
     try {
+      const token = (await db.auth.getJWTToken?.()) || session?.access_token || null
+      if (!token) return
       await fetch('/api/record-request-email', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ request_id: requestId }),
       })
     } catch {
-      // The database notification and outbox remain the source of truth if email delivery is unavailable.
+      // In-app notifications and the email outbox remain the source of truth if email delivery is unavailable.
     }
   }
 
