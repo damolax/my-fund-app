@@ -217,6 +217,108 @@
     return contributorState
   }
 
+  async function createContributorInvite(personId, email) {
+    const result = await db.rpc('mfa_create_member_invite', {
+      p_person_id: personId,
+      p_email: String(email || '').trim().toLowerCase(),
+    })
+    if (result.error) throw result.error
+    await refreshApprovalCenter()
+    return result.data
+  }
+
+  async function acceptContributorInvite(token) {
+    const result = await db.rpc('mfa_accept_member_invite', { p_token: token })
+    if (result.error) throw result.error
+    await refreshCloud()
+    return result.data
+  }
+
+  async function setContributorStatus(memberId, status) {
+    const result = await db.rpc('mfa_set_member_status', {
+      p_member_id: memberId,
+      p_status: status,
+    })
+    if (result.error) throw result.error
+    await refreshApprovalCenter()
+  }
+
+  async function revokeContributorInvite(inviteId) {
+    const result = await db.rpc('mfa_revoke_member_invite', { p_invite_id: inviteId })
+    if (result.error) throw result.error
+    await refreshApprovalCenter()
+  }
+
+  async function triggerRequestEmail(requestId) {
+    try {
+      await fetch('/api/record-request-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id: requestId }),
+      })
+    } catch {
+      // The database notification and outbox remain the source of truth if email delivery is unavailable.
+    }
+  }
+
+  async function submitContributorRequest(values) {
+    const result = await db.rpc('mfa_submit_record_request', {
+      p_person_id: values.person_id,
+      p_request_action: values.request_action || 'create',
+      p_target_transaction_id: values.target_transaction_id || null,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || state.workspace.default_currency).trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerRequestEmail(result.data?.id)
+    await refreshContributorDashboard()
+    return result.data
+  }
+
+  async function updateContributorRequest(requestId, values) {
+    const result = await db.rpc('mfa_update_record_request', {
+      p_request_id: requestId,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || state.workspace.default_currency).trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerRequestEmail(requestId)
+    await refreshContributorDashboard()
+    return result.data
+  }
+
+  async function deleteContributorRequest(requestId) {
+    const result = await db.rpc('mfa_delete_record_request', { p_request_id: requestId })
+    if (result.error) throw result.error
+    await refreshContributorDashboard()
+  }
+
+  async function reviewRecordRequest(requestId, decision, note = '') {
+    const result = await db.rpc('mfa_review_record_request', {
+      p_request_id: requestId,
+      p_decision: decision,
+      p_note: note || null,
+    })
+    if (result.error) throw result.error
+    await refreshCloud()
+    return result.data
+  }
+
+  async function markNotificationRead(notificationId) {
+    const result = await db.rpc('mfa_mark_notification_read', { p_notification_id: notificationId })
+    if (result.error) throw result.error
+    if (isOwner()) await refreshApprovalCenter()
+    else if (isContributor()) await refreshContributorDashboard()
+  }
+
   function normalizeCloudData(payload) {
     return {
       workspace: payload.workspace,
