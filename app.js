@@ -3,13 +3,11 @@
 
   const STORAGE_KEY = 'my-fund-app-v1'
   const CONFIG = window.MY_FUND_CONFIG || {}
-  const CLOUD_CONFIGURED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && CONFIG.neonDataApiUrl)
-  const AUTH_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
-  const DATA_ENABLED = Boolean(CONFIG.neonDataApiUrl && window.createNeonDataClient)
-  const CLOUD_ENABLED = CLOUD_CONFIGURED && AUTH_ENABLED && DATA_ENABLED
-  const CLOUD_UNAVAILABLE = CLOUD_CONFIGURED && !CLOUD_ENABLED
-  const authDb = AUTH_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
-  const db = DATA_ENABLED ? window.createNeonDataClient(CONFIG.neonDataApiUrl, () => session?.access_token || null) : null
+  const CLOUD_CONFIGURED = Boolean(CONFIG.neonAuthUrl && CONFIG.neonDataApiUrl)
+  let CLOUD_ENABLED = false
+  let CLOUD_UNAVAILABLE = false
+  let authDb = null
+  let db = null
   const ADMIN_EMAIL = String(CONFIG.adminEmail || 'oyekunleolalekan3168@gmail.com').trim().toLowerCase()
 
   const DEFAULT_DATA = {
@@ -38,6 +36,22 @@
   let adminLoading = false
   let adminError = ''
   let passwordRecoveryMode = false
+
+  async function initializeCloudClients() {
+    if (!CLOUD_CONFIGURED) return
+    try {
+      const client = await window.MY_FUND_CLOUD_READY
+      if (!client?.auth) throw new Error('Neon cloud client did not initialize.')
+      db = client
+      authDb = client
+      CLOUD_ENABLED = true
+      CLOUD_UNAVAILABLE = false
+    } catch (error) {
+      console.error('Neon cloud initialization failed:', error)
+      CLOUD_ENABLED = false
+      CLOUD_UNAVAILABLE = true
+    }
+  }
 
   const ui = {
     mobileOpen: false,
@@ -1498,7 +1512,7 @@
           ${panelHeading('Data and backup', CLOUD_ENABLED ? 'Cloud data is protected by your account.' : 'Keep a portable copy of local records.')}
           ${
             CLOUD_ENABLED
-              ? '<div class="security-note"><span>◈</span><div><strong>Cloud mode enabled</strong><span>Owner data is protected using Supabase authentication and row-level security.</span></div></div>'
+              ? '<div class="security-note"><span>◈</span><div><strong>Cloud mode enabled</strong><span>Owner data is protected using Neon Auth and Neon row-level security.</span></div></div>'
               : `<button class="secondary-button full-width" data-action="backup-json">⇩ Download JSON backup</button><label class="secondary-button full-width upload-button">↗ Restore JSON backup<input id="restore-file" type="file" accept="application/json"></label>`
           }
         </div>
@@ -2342,7 +2356,7 @@
               })
         if (result.error) throw result.error
         if (mode === 'signup' && !result.data.session) {
-          renderAuth('Account created. Check your email if confirmation is enabled in Supabase.')
+          renderAuth('Account created. You can sign in with your Neon Auth account.')
         }
       } catch (error) {
         renderAuth(error.message, mode, values.email)
@@ -2596,6 +2610,8 @@
   }
 
   async function init() {
+    await initializeCloudClients()
+
     document.addEventListener('submit', handleSubmit)
     document.addEventListener('click', handleClick)
     document.addEventListener('change', handleChange)
