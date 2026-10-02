@@ -1763,6 +1763,7 @@
 
   async function loadViewer(token) {
     clearInterval(viewerTimer)
+    viewerToken = token
     document.getElementById('app').innerHTML = '<div class="full-page-loading"><div class="loading-mark">M</div><span>Opening the read-only dashboard…</span></div>'
     try {
       let payload
@@ -1779,6 +1780,7 @@
             month: String(item.month).slice(0, 7),
           })),
           goals: result.data.goals || [],
+          requests: result.data.requests || [],
         }
       } else {
         const local = loadLocal()
@@ -1790,8 +1792,10 @@
           transactions: local.transactions.filter((item) => item.person_id === person.id),
           budgets: local.budgets.filter((item) => item.person_id === person.id),
           goals: local.goals.filter((item) => item.person_id === person.id),
+          requests: [],
         }
       }
+      viewerState = payload
       renderViewer(payload)
       viewerTimer = setInterval(async () => {
         if (!getRoute().path.startsWith('/view/')) return clearInterval(viewerTimer)
@@ -1809,6 +1813,7 @@
                   month: String(item.month).slice(0, 7),
                 })),
                 goals: result.data.goals || [],
+                requests: result.data.requests || [],
               }
             }
           } else {
@@ -1824,14 +1829,18 @@
               }
             }
           }
-          if (refreshed) renderViewer(refreshed)
+          if (refreshed) {
+            viewerState = refreshed
+            renderViewer(refreshed)
+          }
         } catch {
           // Keep the last successful view visible.
         }
       }, 5000)
     } catch (error) {
+      viewerState = null
       document.getElementById('app').innerHTML = `
-        <div class="viewer-error"><div class="brand-mark">M</div><h1>Viewer link unavailable</h1><p>${escapeHtml(error.message)}</p></div>`
+        <div class="viewer-error"><div class="brand-mark">M</div><h1>Secure link unavailable</h1><p>${escapeHtml(error.message)}</p></div>`
     }
   }
 
@@ -1850,6 +1859,7 @@
   }
 
   function renderViewer(payload) {
+    viewerState = payload
     const person = { ...payload.person, starting_balances: payload.person.starting_balances || {} }
     const data = {
       workspace: payload.workspace,
@@ -1904,11 +1914,12 @@
     document.getElementById('app').innerHTML = `
       <div class="viewer-page">
         <header class="viewer-header">
-          <div class="brand-row viewer-brand"><div class="brand-mark">M</div><div><strong>${escapeHtml(payload.workspace.name || 'My Fund App')}</strong><span>Read-only finance dashboard</span></div></div>
+          <div class="brand-row viewer-brand"><div class="brand-mark">M</div><div><strong>${escapeHtml(payload.workspace.name || 'My Fund App')}</strong><span>Personal finance record</span></div></div>
           <div><div class="live-badge"><span class="status-dot"></span>Updated automatically</div><div class="viewer-refresh">Checks every 5 seconds</div></div>
         </header>
         <main class="viewer-main">
-          ${pageHeader('Your records', person.name, 'Income, actual expenses, monthly limits and current balances. A minus balance means borrowed funds are currently in use.')}
+          ${pageHeader('Your money record', person.name, 'You can see approved income and expenses here. You may request a new income or expense record, but nothing changes your balance until the manager approves it.', '<div class="button-row"><button class="secondary-button" data-action="viewer-open-request" data-type="expense">↗ Request expense</button><button class="primary-button" data-action="viewer-open-request" data-type="income">↘ Request income</button></div>')}
+          <section class="panel"><div class="panel-heading"><div><h2>Your record requests</h2><p>Pending requests can be edited or deleted. Approved records are locked.</p></div></div>${viewerRequestCards(payload.requests || [])}</section>
           <div class="viewer-currencies">${sections}</div>
         </main>
       </div>`
