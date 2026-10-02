@@ -164,18 +164,6 @@
     return adminState
   }
 
-  async function migrateSupabaseSnapshotToNeon() {
-    if (!isPlatformAdmin()) throw new Error('Platform admin access is restricted.')
-    if (!authDb) throw new Error('Supabase authentication is unavailable.')
-    const source = await authDb.rpc('mfa_admin_overview')
-    if (source.error) throw source.error
-    const imported = await db.rpc('mfa_import_supabase_snapshot', { p_payload: source.data })
-    if (imported.error) throw imported.error
-    await refreshCloud()
-    await refreshAdmin()
-    return imported.data || {}
-  }
-
   function normalizeCloudData(payload) {
     return {
       workspace: payload.workspace,
@@ -483,42 +471,6 @@
       <div id="modal-root"></div>`
   }
 
-  async function migrateSignedInUserFromSupabase() {
-    if (!authDb || !db || !session?.user) return null
-
-    const sourceWorkspaceResult = await authDb
-      .from('mfa_workspaces')
-      .select('*')
-      .eq('owner_id', session.user.id)
-      .maybeSingle()
-    if (sourceWorkspaceResult.error) throw sourceWorkspaceResult.error
-    const sourceWorkspace = sourceWorkspaceResult.data
-    if (!sourceWorkspace) return null
-
-    const [peopleResult, transactionResult, budgetResult, goalResult] = await Promise.all([
-      authDb.from('mfa_people').select('*').eq('workspace_id', sourceWorkspace.id),
-      authDb.from('mfa_transactions').select('*').eq('workspace_id', sourceWorkspace.id),
-      authDb.from('mfa_monthly_budgets').select('*').eq('workspace_id', sourceWorkspace.id),
-      authDb.from('mfa_goals').select('*').eq('workspace_id', sourceWorkspace.id),
-    ])
-
-    for (const result of [peopleResult, transactionResult, budgetResult, goalResult]) {
-      if (result.error) throw result.error
-    }
-
-    const imported = await db.rpc('mfa_import_own_snapshot', {
-      p_payload: {
-        workspaces: [sourceWorkspace],
-        people: peopleResult.data || [],
-        transactions: transactionResult.data || [],
-        budgets: budgetResult.data || [],
-        goals: goalResult.data || [],
-      },
-    })
-    if (imported.error) throw imported.error
-    return imported.data || null
-  }
-
   async function refreshCloud() {
     if (!CLOUD_ENABLED || !session?.user) return
     try {
@@ -529,19 +481,6 @@
         .maybeSingle()
       if (workspaceResult.error) throw workspaceResult.error
       let workspace = workspaceResult.data
-      if (!workspace) {
-        const migrated = await migrateSignedInUserFromSupabase()
-        if (migrated?.imported) {
-          workspaceResult = await db
-            .from('mfa_workspaces')
-            .select('*')
-            .eq('owner_id', session.user.id)
-            .maybeSingle()
-          if (workspaceResult.error) throw workspaceResult.error
-          workspace = workspaceResult.data
-        }
-      }
-
       if (!workspace) {
         const created = await db
           .from('mfa_workspaces')
@@ -1515,7 +1454,7 @@
       : '<div class="panel empty-state"><h2>No My Fund App accounts yet</h2><p>Accounts appear here after they sign in to this app.</p></div>'
 
     const content = `
-      ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<div class="button-row"><button class="secondary-button" data-action="migrate-supabase">⇄ Import Supabase data</button><button class="secondary-button" data-action="refresh-admin">↻ Refresh</button></div>')}
+      ${pageHeader('Platform admin', 'My Fund App accounts', 'See who uses My Fund App, the people they track and the net funds held in each currency.', '<button class="secondary-button" data-action="refresh-admin">↻ Refresh</button>')}
       <section class="summary-grid admin-summary-grid">
         ${summaryCard('Accounts using app', String(users.length), '◎', 'Registered My Fund App accounts')}
         ${summaryCard('People being tracked', String(people.length), '◉', 'Across every account')}
@@ -2434,21 +2373,6 @@
     }
     if (action === 'back-to-signin') {
       renderAuth()
-      return
-    }
-    if (action === 'migrate-supabase') {
-      if (!isPlatformAdmin() || busy) return
-      if (!confirm('Import the current My Fund App snapshot from Supabase into Neon? Existing matching records in Neon will be updated.')) return
-      busy = true
-      try {
-        const result = await migrateSupabaseSnapshotToNeon()
-        render()
-        toast(`Neon import complete: ${result.workspaces || 0} workspaces, ${result.people || 0} people and ${result.transactions || 0} transactions processed.`)
-      } catch (error) {
-        toast(error.message || 'Unable to import Supabase data into Neon.', 'danger')
-      } finally {
-        busy = false
-      }
       return
     }
     if (action === 'refresh-admin') {
