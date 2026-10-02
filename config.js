@@ -1,5 +1,5 @@
 window.MY_FUND_CONFIG = {
-  // Supabase is retained for authentication only during the database migration.
+  // Supabase is used for authentication only. Finance data is stored in Neon.
   supabaseUrl: 'https://qsnlvpwqkxqyeluafhoe.supabase.co',
   supabasePublishableKey: 'sb_publishable_X1Oki1Ld_lxTujl7ntJRBg_X0FfamHA',
 
