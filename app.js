@@ -1208,6 +1208,26 @@
     )
     const base = location.href.split('#')[0]
     const viewerLink = `${base}#/view/${person.share_token}`
+    const contributorMembers = (approvalState.members || []).filter((item) => item.person_id === person.id)
+    const contributorInvites = (approvalState.invites || []).filter((item) => item.person_id === person.id)
+    const contributorAccessRows = [
+      ...contributorMembers.map((member) => {
+        const enabled = member.status === 'active'
+        return `<div class="access-row">
+          <div><strong>${escapeHtml(member.email)}</strong><span>${enabled ? 'Active contributor' : 'Access disabled'}</span></div>
+          <button class="text-button" data-action="toggle-contributor" data-member-id="${member.id}" data-status="${enabled ? 'disabled' : 'active'}">${enabled ? 'Disable' : 'Enable'}</button>
+        </div>`
+      }),
+      ...contributorInvites
+        .filter((invite) => !invite.accepted_at && !invite.revoked_at && new Date(invite.expires_at) > new Date())
+        .map((invite) => {
+          const link = `${base}#/join/${invite.token}`
+          return `<div class="access-row">
+            <div><strong>${escapeHtml(invite.email)}</strong><span>Invite pending until ${formatTimestamp(invite.expires_at)}</span></div>
+            <div class="row-actions"><button class="text-button" data-action="copy-link" data-link="${escapeHtml(link)}">Copy invite</button><button class="text-button danger-text" data-action="revoke-invite" data-invite-id="${invite.id}">Revoke</button></div>
+          </div>`
+        }),
+    ].join('') || '<div class="small-empty">No contributor access has been granted yet.</div>'
 
     const currencySelect = currencyChoiceOptions(currency)
 
@@ -1245,6 +1265,16 @@
             <div class="share-box"><span>🔗</span><div><strong>Viewer link</strong><span>${CLOUD_ENABLED ? 'Updates automatically from the cloud.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
             <div class="copy-row"><input readonly value="${escapeHtml(viewerLink)}"><button class="secondary-button" data-action="copy-link" data-link="${escapeHtml(viewerLink)}">⧉ Copy</button></div>
             <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace viewer link</button>
+          </div>
+          <div class="panel">
+            ${panelHeading('Contributor access', 'Let this person submit records for approval')}
+            <form id="invite-contributor-form" class="invite-form">
+              <input type="hidden" name="person_id" value="${person.id}">
+              <label class="field"><span>Contributor email</span><input name="email" type="email" placeholder="person@example.com" required></label>
+              <button class="secondary-button full-width">Create secure invite</button>
+            </form>
+            <div class="access-list">${contributorAccessRows}</div>
+            <div class="helper-text">Contributors can only submit pending requests. They cannot write, edit or delete approved ledger records.</div>
           </div>
           <div class="panel">
             ${panelHeading('Savings goals', `${goals.length} tracked`, `<button class="text-button" data-action="open-goal" data-person-id="${person.id}" data-currency="${currency}">＋ Add goal</button>`)}
