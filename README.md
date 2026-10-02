@@ -1,70 +1,86 @@
-# My Fund App — final working build
+# My Fund App — Neon production build
 
 My Fund App tracks money held for different people using starting balances, income, actual expenses, monthly PV and Upkeep limits, negative balances, borrowed funds, goals, exports, secure viewer links, and a platform-admin overview.
 
-## Production configuration already included
+## Production architecture
 
-- Supabase project: `https://qsnlvpwqkxqyeluafhoe.supabase.co`
-- My Fund App URL: `https://my-fund-app-one.vercel.app/`
+- App URL: `https://my-fund-app-one.vercel.app/`
+- Finance database: Neon Postgres, database `my_fund_app`
+- Browser data access: Neon Data API
+- Authentication during the current transition: existing Supabase Auth
 - Platform administrator: `oyekunleolalekan3168@gmail.com`
 
-The browser app uses only the Supabase publishable key. Never add a `service_role` or secret key to `config.js`.
+The browser never receives a Neon Postgres password. Finance data is protected by Neon row-level security and accessed through the Neon Data API.
 
-## Shared Supabase project
+Supabase is retained temporarily only for sign-in, sign-up, password recovery, existing sessions, and migration of legacy My Fund App records. The legacy Supabase finance tables should remain untouched until the Neon data copy has been fully verified.
 
-My Fund App can safely use the same Supabase project and Auth accounts as Elevate Office Tracker. Every My Fund App database object begins with `mfa_`, so the finance records stay separate from Elevate Office Tracker.
+## Neon database setup
 
-The same Supabase email and password can sign in to both apps. Browser sessions may still require a separate sign-in on each domain.
-
-## Required database setup
-
-### New My Fund App installation
-
-Run this entire file in Supabase SQL Editor:
+The production Neon schema is stored in:
 
 ```text
-supabase/schema.sql
+neon/schema.sql
 ```
 
-### Existing My Fund App installation
+It creates:
 
-Run this file once in Supabase SQL Editor:
+- `mfa_workspaces`
+- `mfa_app_users`
+- `mfa_people`
+- `mfa_transactions`
+- `mfa_monthly_budgets`
+- `mfa_goals`
+- workspace-owner RLS policies
+- secure public-view RPC
+- platform-admin overview RPC
+- per-user and platform-wide Supabase-to-Neon migration RPCs
+
+## Automatic legacy-data migration
+
+When an existing user signs in and Neon does not yet contain that user's workspace, the app first reads that user's existing My Fund App records from Supabase and imports them into Neon while preserving the original IDs.
+
+The platform administrator also has an **Import Supabase data** action that can migrate the full existing My Fund App snapshot into Neon.
+
+This prevents a new empty Neon workspace from replacing an existing Supabase workspace during cutover.
+
+## Platform administrator
+
+Admin access is restricted in the database and interface to:
 
 ```text
-supabase/final-upgrade.sql
+oyekunleolalekan3168@gmail.com
 ```
 
-It adds:
+The admin dashboard provides:
 
-- Editable multi-currency starting balances for every person.
-- Transactions whose exact date is unknown.
+- number of accounts using My Fund App
+- total people being tracked
+- total income and expense records
+- gross money tracked per currency
+- current holdings per currency
+- total expenses per currency
+- borrowed/negative balances per currency
+- per-account people and record counts
+- per-person current balances
+- a dedicated Main account section for the administrator account
 
-It does not touch Elevate Office Tracker tables.
+### Analytics definitions
 
-If the platform-admin functions have never been installed, also run:
+**Total money tracked**:
 
 ```text
-supabase/admin-auth-upgrade.sql
+positive opening balances + recorded income
 ```
 
-## Supabase Auth URL configuration
-
-Keep the existing Site URL as:
+**Current balance for a person**:
 
 ```text
-https://elevate-office-tracker.vercel.app/
+starting balance + recorded income - recorded expenses
 ```
 
-Under Authentication → URL Configuration → Redirect URLs, include:
+**Current platform holdings** are the sum of all current person balances by currency. Negative balances are shown separately as borrowed funds. Currencies are never converted or combined.
 
-```text
-https://elevate-office-tracker.vercel.app/**
-https://my-fund-app-one.vercel.app/**
-```
-
-The default Supabase email templates can remain unchanged.
-
-## Final financial rules
+## Financial rules
 
 - Starting balance is an opening position, not income or expense.
 - Starting balances can be positive or negative and are stored separately per currency.
@@ -86,40 +102,30 @@ The Income and Expense forms allow multiple rows to be saved together. Every row
 - Expense category, where applicable
 - Description
 
-An unknown-date record affects all-time balances immediately. Because no month is known, it does not count in month-specific reports or against a particular month’s PV or Upkeep limit.
+An unknown-date record affects all-time balances immediately. Because no month is known, it does not count in month-specific reports or against a particular month's PV or Upkeep limit.
 
 ## Starting balances
 
 A starting balance can be entered when a person is created. It can also be added or updated later from the person dashboard for any currency.
 
-Updating it recalculates:
+Updating it recalculates person balance, owner totals, borrowed funds, viewer dashboard, admin overview, reports and exports. It does not create a transaction.
 
-- Person balance
-- Owner totals
-- Borrowed funds
-- Viewer dashboard
-- Admin overview
-- Reports and exports
+## Authentication
 
-It does not create a transaction.
+The current release keeps the existing Supabase Auth directory so existing users keep their login credentials while the finance database moves to Neon.
 
-## Authentication and administration
+Supported flows remain:
 
-- Sign in and create account
+- Sign in
+- Create account
 - Forgot password
+- Password reset
 - Show/hide password
-- Secure password reset
-- Platform admin restricted in the database to `oyekunleolalekan3168@gmail.com`
-- Admin view includes only accounts that actually use My Fund App
 
-Passwords are never readable by the platform administrator.
+A later phase can move authentication to Neon Auth if complete Supabase removal is desired.
 
-## Deploy
+## Deployment
 
-This is a static app. Vercel requires no build command. Push the contents of this folder to:
+This remains a static Vercel app with no build command. The production Vercel project deploys from the repository's `main` branch.
 
-```text
-https://github.com/damolax/my-fund-app
-```
-
-Vercel will redeploy from the repository.
+See `NEON_MIGRATION.md` for migration and rollback details.
