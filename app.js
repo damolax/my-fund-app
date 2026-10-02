@@ -3,13 +3,11 @@
 
   const STORAGE_KEY = 'my-fund-app-v1'
   const CONFIG = window.MY_FUND_CONFIG || {}
-  const CLOUD_CONFIGURED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && CONFIG.neonDataApiUrl)
-  const AUTH_ENABLED = Boolean(CONFIG.supabaseUrl && CONFIG.supabasePublishableKey && window.supabase)
-  const DATA_ENABLED = Boolean(CONFIG.neonDataApiUrl && window.createNeonDataClient)
-  const CLOUD_ENABLED = CLOUD_CONFIGURED && AUTH_ENABLED && DATA_ENABLED
-  const CLOUD_UNAVAILABLE = CLOUD_CONFIGURED && !CLOUD_ENABLED
-  const authDb = AUTH_ENABLED ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabasePublishableKey) : null
-  const db = DATA_ENABLED ? window.createNeonDataClient(CONFIG.neonDataApiUrl, () => session?.access_token || null) : null
+  const CLOUD_CONFIGURED = Boolean(CONFIG.neonAuthUrl && CONFIG.neonDataApiUrl)
+  let CLOUD_ENABLED = false
+  let CLOUD_UNAVAILABLE = false
+  let authDb = null
+  let db = null
   const ADMIN_EMAIL = String(CONFIG.adminEmail || 'oyekunleolalekan3168@gmail.com').trim().toLowerCase()
 
   const DEFAULT_DATA = {
@@ -38,6 +36,27 @@
   let adminLoading = false
   let adminError = ''
   let passwordRecoveryMode = false
+  let accessContext = null
+  let approvalState = { requests: [], notifications: [], members: [], invites: [] }
+  let contributorState = null
+  let approvalLoading = false
+  let approvalError = ''
+
+  async function initializeCloudClients() {
+    if (!CLOUD_CONFIGURED) return
+    try {
+      const client = await window.MY_FUND_CLOUD_READY
+      if (!client?.auth) throw new Error('Neon cloud client did not initialize.')
+      db = client
+      authDb = client
+      CLOUD_ENABLED = true
+      CLOUD_UNAVAILABLE = false
+    } catch (error) {
+      console.error('Neon cloud initialization failed:', error)
+      CLOUD_ENABLED = false
+      CLOUD_UNAVAILABLE = true
+    }
+  }
 
   const ui = {
     mobileOpen: false,
@@ -162,6 +181,146 @@
     adminState = result.data || { users: [], workspaces: [], people: [], transactions: [], budgets: [], goals: [] }
     adminError = ''
     return adminState
+  }
+
+  function isContributor() {
+    return accessContext?.role === 'contributor'
+  }
+
+  function isOwner() {
+    return accessContext?.role === 'owner'
+  }
+
+  async function refreshApprovalCenter() {
+    if (!CLOUD_ENABLED || !session?.user || !isOwner()) return approvalState
+    const result = await db.rpc('mfa_get_approval_center')
+    if (result.error) throw result.error
+    approvalState = result.data || { requests: [], notifications: [], members: [], invites: [] }
+    approvalError = ''
+    return approvalState
+  }
+
+  async function refreshContributorDashboard() {
+    if (!CLOUD_ENABLED || !session?.user || !isContributor()) return null
+    const result = await db.rpc('mfa_get_contributor_dashboard')
+    if (result.error) throw result.error
+    contributorState = result.data || null
+    if (contributorState) {
+      state = normalizeCloudData({
+        workspace: contributorState.workspace,
+        people: contributorState.person ? [contributorState.person] : [],
+        transactions: contributorState.transactions || [],
+        budgets: contributorState.budgets || [],
+        goals: contributorState.goals || [],
+      })
+    }
+    return contributorState
+  }
+
+  async function createContributorInvite(personId, email) {
+    const result = await db.rpc('mfa_create_member_invite', {
+      p_person_id: personId,
+      p_email: String(email || '').trim().toLowerCase(),
+    })
+    if (result.error) throw result.error
+    await refreshApprovalCenter()
+    return result.data
+  }
+
+  async function acceptContributorInvite(token) {
+    const result = await db.rpc('mfa_accept_member_invite', { p_token: token })
+    if (result.error) throw result.error
+    await refreshCloud()
+    return result.data
+  }
+
+  async function setContributorStatus(memberId, status) {
+    const result = await db.rpc('mfa_set_member_status', {
+      p_member_id: memberId,
+      p_status: status,
+    })
+    if (result.error) throw result.error
+    await refreshApprovalCenter()
+  }
+
+  async function revokeContributorInvite(inviteId) {
+    const result = await db.rpc('mfa_revoke_member_invite', { p_invite_id: inviteId })
+    if (result.error) throw result.error
+    await refreshApprovalCenter()
+  }
+
+  async function triggerRequestEmail(requestId) {
+    if (!requestId || !session?.access_token) return
+    try {
+      await fetch('/api/record-request-email', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ request_id: requestId }),
+      })
+    } catch {
+      // The database notification and outbox remain the source of truth if email delivery is unavailable.
+    }
+  }
+
+  async function submitContributorRequest(values) {
+    const result = await db.rpc('mfa_submit_record_request', {
+      p_person_id: values.person_id,
+      p_request_action: values.request_action || 'create',
+      p_target_transaction_id: values.target_transaction_id || null,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || state.workspace.default_currency).trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerRequestEmail(result.data?.id)
+    await refreshContributorDashboard()
+    return result.data
+  }
+
+  async function updateContributorRequest(requestId, values) {
+    const result = await db.rpc('mfa_update_record_request', {
+      p_request_id: requestId,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || state.workspace.default_currency).trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerRequestEmail(requestId)
+    await refreshContributorDashboard()
+    return result.data
+  }
+
+  async function deleteContributorRequest(requestId) {
+    const result = await db.rpc('mfa_delete_record_request', { p_request_id: requestId })
+    if (result.error) throw result.error
+    await refreshContributorDashboard()
+  }
+
+  async function reviewRecordRequest(requestId, decision, note = '') {
+    const result = await db.rpc('mfa_review_record_request', {
+      p_request_id: requestId,
+      p_decision: decision,
+      p_note: note || null,
+    })
+    if (result.error) throw result.error
+    await refreshCloud()
+    return result.data
+  }
+
+  async function markNotificationRead(notificationId) {
+    const result = await db.rpc('mfa_mark_notification_read', { p_notification_id: notificationId })
+    if (result.error) throw result.error
+    if (isOwner()) await refreshApprovalCenter()
+    else if (isContributor()) await refreshContributorDashboard()
   }
 
   function normalizeCloudData(payload) {
@@ -420,14 +579,24 @@
   }
 
   function shell(content, active) {
-    const nav = [
-      ['dashboard', '▦', 'Dashboard'],
-      ['people', '◉', 'People'],
-      ['transactions', '≡', 'Transactions'],
-      ['reports', '⇩', 'Reports'],
-      ...(isPlatformAdmin() ? [['admin', '◆', 'Platform admin']] : []),
-      ['settings', '⚙', 'Settings'],
-    ]
+    const ownerPending = (approvalState.requests || []).filter((item) => item.status === 'pending').length
+    const contributorUnread = (contributorState?.notifications || []).filter((item) => !item.is_read).length
+    const navItems = isContributor()
+      ? [
+          ['contributor', '▦', 'My records'],
+          ['requests', '◎', `Requests${contributorUnread ? ` · ${contributorUnread}` : ''}`],
+        ]
+      : [
+          ['dashboard', '▦', 'Dashboard'],
+          ['people', '◉', 'People'],
+          ['transactions', '≡', 'Transactions'],
+          ['approvals', '✓', `Approvals${ownerPending ? ` · ${ownerPending}` : ''}`],
+          ['reports', '⇩', 'Reports'],
+          ...(isPlatformAdmin() ? [['admin', '◆', 'Platform admin']] : []),
+          ['settings', '⚙', 'Settings'],
+        ]
+
+    const nav = navItems
       .map(
         ([path, glyph, label]) => `
           <a class="nav-item ${active === path ? 'active' : ''}" href="#/${path}">
@@ -474,13 +643,26 @@
   async function refreshCloud() {
     if (!CLOUD_ENABLED || !session?.user) return
     try {
-      let workspaceResult = await db
-        .from('mfa_workspaces')
-        .select('*')
-        .eq('owner_id', session.user.id)
-        .maybeSingle()
-      if (workspaceResult.error) throw workspaceResult.error
-      let workspace = workspaceResult.data
+      const contextResult = await db.rpc('mfa_get_access_context')
+      if (contextResult.error) throw contextResult.error
+      accessContext = contextResult.data || null
+
+      if (accessContext?.role === 'contributor') {
+        await touchAppUser()
+        await refreshContributorDashboard()
+        subscribeRealtime()
+        return
+      }
+
+      let workspace = accessContext?.role === 'owner' ? accessContext.workspace : null
+      const route = getRoute()
+
+      if (!workspace && route.path.startsWith('/join/')) {
+        state = structuredClone(DEFAULT_DATA)
+        contributorState = null
+        return
+      }
+
       if (!workspace) {
         const created = await db
           .from('mfa_workspaces')
@@ -494,11 +676,15 @@
           .single()
         if (created.error) throw created.error
         workspace = created.data
+        accessContext = { role: 'owner', workspace }
+      } else {
+        accessContext = { ...accessContext, role: 'owner', workspace }
       }
 
+      contributorState = null
       await touchAppUser()
 
-      const [peopleResult, transactionResult, budgetResult, goalResult] = await Promise.all([
+      const [peopleResult, transactionResult, budgetResult, goalResult, approvalResult] = await Promise.all([
         db.from('mfa_people').select('*').eq('workspace_id', workspace.id).order('created_at'),
         db
           .from('mfa_transactions')
@@ -508,8 +694,9 @@
           .order('created_at', { ascending: false }),
         db.from('mfa_monthly_budgets').select('*').eq('workspace_id', workspace.id),
         db.from('mfa_goals').select('*').eq('workspace_id', workspace.id),
+        db.rpc('mfa_get_approval_center'),
       ])
-      for (const result of [peopleResult, transactionResult, budgetResult, goalResult]) {
+      for (const result of [peopleResult, transactionResult, budgetResult, goalResult, approvalResult]) {
         if (result.error) throw result.error
       }
       state = normalizeCloudData({
@@ -519,6 +706,8 @@
         budgets: budgetResult.data,
         goals: goalResult.data,
       })
+      approvalState = approvalResult.data || { requests: [], notifications: [], members: [], invites: [] }
+      approvalError = ''
       subscribeRealtime()
     } catch (error) {
       toast(error.message || 'Unable to load cloud records.', 'danger')
@@ -1023,6 +1212,26 @@
     )
     const base = location.href.split('#')[0]
     const viewerLink = `${base}#/view/${person.share_token}`
+    const contributorMembers = (approvalState.members || []).filter((item) => item.person_id === person.id)
+    const contributorInvites = (approvalState.invites || []).filter((item) => item.person_id === person.id)
+    const contributorAccessRows = [
+      ...contributorMembers.map((member) => {
+        const enabled = member.status === 'active'
+        return `<div class="access-row">
+          <div><strong>${escapeHtml(member.email)}</strong><span>${enabled ? 'Active contributor' : 'Access disabled'}</span></div>
+          <button class="text-button" data-action="toggle-contributor" data-member-id="${member.id}" data-status="${enabled ? 'disabled' : 'active'}">${enabled ? 'Disable' : 'Enable'}</button>
+        </div>`
+      }),
+      ...contributorInvites
+        .filter((invite) => !invite.accepted_at && !invite.revoked_at && new Date(invite.expires_at) > new Date())
+        .map((invite) => {
+          const link = `${base}#/join/${invite.token}`
+          return `<div class="access-row">
+            <div><strong>${escapeHtml(invite.email)}</strong><span>Invite pending until ${formatTimestamp(invite.expires_at)}</span></div>
+            <div class="row-actions"><button class="text-button" data-action="copy-link" data-link="${escapeHtml(link)}">Copy invite</button><button class="text-button danger-text" data-action="revoke-invite" data-invite-id="${invite.id}">Revoke</button></div>
+          </div>`
+        }),
+    ].join('') || '<div class="small-empty">No contributor access has been granted yet.</div>'
 
     const currencySelect = currencyChoiceOptions(currency)
 
@@ -1060,6 +1269,16 @@
             <div class="share-box"><span>🔗</span><div><strong>Viewer link</strong><span>${CLOUD_ENABLED ? 'Updates automatically from the cloud.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
             <div class="copy-row"><input readonly value="${escapeHtml(viewerLink)}"><button class="secondary-button" data-action="copy-link" data-link="${escapeHtml(viewerLink)}">⧉ Copy</button></div>
             <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace viewer link</button>
+          </div>
+          <div class="panel">
+            ${panelHeading('Contributor access', 'Let this person submit records for approval')}
+            <form id="invite-contributor-form" class="invite-form">
+              <input type="hidden" name="person_id" value="${person.id}">
+              <label class="field"><span>Contributor email</span><input name="email" type="email" placeholder="person@example.com" required></label>
+              <button class="secondary-button full-width">Create secure invite</button>
+            </form>
+            <div class="access-list">${contributorAccessRows}</div>
+            <div class="helper-text">Contributors can only submit pending requests. They cannot write, edit or delete approved ledger records.</div>
           </div>
           <div class="panel">
             ${panelHeading('Savings goals', `${goals.length} tracked`, `<button class="text-button" data-action="open-goal" data-person-id="${person.id}" data-currency="${currency}">＋ Add goal</button>`)}
@@ -1498,7 +1717,7 @@
           ${panelHeading('Data and backup', CLOUD_ENABLED ? 'Cloud data is protected by your account.' : 'Keep a portable copy of local records.')}
           ${
             CLOUD_ENABLED
-              ? '<div class="security-note"><span>◈</span><div><strong>Cloud mode enabled</strong><span>Owner data is protected using Supabase authentication and row-level security.</span></div></div>'
+              ? '<div class="security-note"><span>◈</span><div><strong>Cloud mode enabled</strong><span>Owner data is protected using Neon Auth and Neon row-level security.</span></div></div>'
               : `<button class="secondary-button full-width" data-action="backup-json">⇩ Download JSON backup</button><label class="secondary-button full-width upload-button">↗ Restore JSON backup<input id="restore-file" type="file" accept="application/json"></label>`
           }
         </div>
@@ -1515,7 +1734,7 @@
   }
 
   function passwordField(name, label, idValue, options = {}) {
-    const minlength = options.minlength || 6
+    const minlength = options.minlength || 8
     const autocomplete = options.autocomplete || 'current-password'
     return `<label class="field"><span>${escapeHtml(label)}</span><div class="password-input-wrap"><input id="${idValue}" name="${name}" type="password" minlength="${minlength}" autocomplete="${autocomplete}" required><button type="button" class="password-toggle" data-action="toggle-password" data-target="${idValue}">Show</button></div></label>`
   }
@@ -1558,7 +1777,7 @@
       <div class="auth-page">
         ${authBrand()}
         <form class="auth-card" id="reset-password-form">
-          <div class="auth-form-heading"><h2>Choose a new password</h2><p>Use at least six characters.</p></div>
+          <div class="auth-form-heading"><h2>Choose a new password</h2><p>Use at least eight characters.</p></div>
           ${passwordField('password', 'New password', 'new-password', { autocomplete: 'new-password' })}
           ${passwordField('confirm_password', 'Confirm new password', 'confirm-new-password', { autocomplete: 'new-password' })}
           ${message ? `<div class="info-box">${escapeHtml(message)}</div>` : ''}
@@ -1734,6 +1953,207 @@
       .join('')}</div>`
   }
 
+  function requestStatusBadge(status) {
+    const clean = String(status || 'pending')
+    const label = clean === 'approved' ? 'Approved' : clean === 'rejected' ? 'Rejected' : 'Pending approval'
+    return `<span class="request-status ${escapeHtml(clean)}">${label}</span>`
+  }
+
+  function contributorTransactionList(records) {
+    if (!records.length) return '<div class="small-empty">No approved records yet.</div>'
+    return `<div class="transaction-list">${sortTransactions(records, true)
+      .map((item) => `
+        <div class="transaction-row">
+          <div class="transaction-icon ${item.type}">${item.type === 'income' ? '↘' : '↗'}</div>
+          <div class="transaction-main">
+            <strong>${escapeHtml(item.description)}</strong>
+            <span>${item.category ? `${escapeHtml(item.category)} · ` : ''}${formatDate(item.date)}</span>
+          </div>
+          <strong class="${item.type === 'income' ? 'income-text' : ''}">${item.type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</strong>
+          <button class="secondary-button compact-button" data-action="request-update" data-transaction-id="${item.id}">Request update</button>
+        </div>`)
+      .join('')}</div>`
+  }
+
+  function contributorRequestCards(requests) {
+    if (!requests.length) return '<div class="small-empty">No requests submitted yet.</div>'
+    return `<div class="request-list">${requests
+      .map((item) => {
+        const editable = item.status === 'pending'
+        const actionLabel = item.request_action === 'update' ? 'Update record' : 'New record'
+        return `
+          <article class="request-card" data-request-id="${item.id}">
+            <div class="request-card-head">
+              <div><span class="eyebrow">${actionLabel}</span><h3>${escapeHtml(item.description)}</h3></div>
+              ${requestStatusBadge(item.status)}
+            </div>
+            <div class="request-meta">
+              <span>${item.transaction_type === 'income' ? 'Income' : 'Expense'}</span>
+              <strong>${money(item.amount, item.currency)}</strong>
+              <span>${formatDate(item.date)}</span>
+              ${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}
+            </div>
+            ${item.reviewer_note ? `<div class="review-note"><strong>Manager note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
+            ${editable ? `<div class="request-actions"><button class="secondary-button" data-action="edit-request" data-request-id="${item.id}">Edit</button><button class="text-button danger-text" data-action="delete-request" data-request-id="${item.id}">Delete request</button></div>` : '<div class="immutable-note">This request is locked because it has already been reviewed.</div>'}
+          </article>`
+      })
+      .join('')}</div>`
+  }
+
+  function contributorNotifications() {
+    const notifications = contributorState?.notifications || []
+    if (!notifications.length) return '<div class="small-empty">No notifications yet.</div>'
+    return `<div class="notification-list">${notifications.slice(0, 20).map((item) => `
+      <button class="notification-item ${item.is_read ? '' : 'unread'}" data-action="read-notification" data-notification-id="${item.id}">
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.body)}</span>
+        <small>${formatTimestamp(item.created_at)}</small>
+      </button>`).join('')}</div>`
+  }
+
+  function renderContributor() {
+    const person = contributorState?.person
+    if (!person) return shell('<section class="panel empty-state"><h2>Contributor access unavailable</h2><p>Your account is not connected to a person yet.</p></section>', 'contributor')
+
+    const currencies = uniqueCurrencies(person.id)
+    const balanceCards = (currencies.length ? currencies : [state.workspace.default_currency]).map((currency) => {
+      const position = personPosition(person.id, currency)
+      return summaryCard(
+        `${currency} current balance`,
+        money(position.balance, currency),
+        '▣',
+        `${money(position.income, currency)} income · ${money(position.expenses, currency)} expenses`,
+        position.balance < 0,
+      )
+    }).join('')
+
+    const pending = (contributorState.requests || []).filter((item) => item.status === 'pending').length
+    const content = `
+      ${pageHeader(
+        'Contributor account',
+        person.name,
+        'You can submit new records or corrections. Nothing changes the real ledger until the account manager approves it.',
+        `<div class="button-row"><button class="secondary-button" data-action="open-request" data-type="expense">↗ Request expense</button><button class="primary-button" data-action="open-request" data-type="income">↘ Request income</button></div>`,
+      )}
+      <section class="summary-card-grid four">
+        ${balanceCards}
+        ${summaryCard('Pending requests', String(pending), '◎', 'Editable until the manager reviews them')}
+      </section>
+      <section class="panel">
+        ${panelHeading('Approved records', `${state.transactions.length} recorded item${state.transactions.length === 1 ? '' : 's'}`)}
+        ${contributorTransactionList(state.transactions)}
+      </section>
+      <section class="panel">
+        ${panelHeading('Notifications', 'Approval and rejection updates')}
+        ${contributorNotifications()}
+      </section>`
+    return shell(content, 'contributor')
+  }
+
+  function renderContributorRequests() {
+    const requests = contributorState?.requests || []
+    const pending = requests.filter((item) => item.status === 'pending').length
+    const content = `
+      ${pageHeader(
+        'Request history',
+        'Your record requests',
+        'Pending requests can be edited or deleted. Once approved or rejected, they are locked.',
+        `<div class="button-row"><button class="secondary-button" data-action="open-request" data-type="expense">↗ Expense request</button><button class="primary-button" data-action="open-request" data-type="income">↘ Income request</button></div>`,
+      )}
+      <section class="summary-grid">
+        ${summaryCard('Pending', String(pending), '◎', 'Waiting for manager review')}
+        ${summaryCard('Approved', String(requests.filter((item) => item.status === 'approved').length), '✓')}
+        ${summaryCard('Rejected', String(requests.filter((item) => item.status === 'rejected').length), '×')}
+      </section>
+      <section class="panel">
+        ${contributorRequestCards(requests)}
+      </section>`
+    return shell(content, 'requests')
+  }
+
+  function ownerRequestCards(requests, focusId = '') {
+    if (!requests.length) return '<div class="small-empty">No submitted requests yet.</div>'
+    return `<div class="request-list">${requests.map((item) => {
+      const pending = item.status === 'pending'
+      const focused = focusId && item.id === focusId
+      return `
+        <article class="request-card ${focused ? 'request-focus' : ''}" data-request-id="${item.id}">
+          <div class="request-card-head">
+            <div>
+              <span class="eyebrow">${item.request_action === 'update' ? 'Record update request' : 'New record request'}</span>
+              <h3>${escapeHtml(item.person_name || 'Person')}</h3>
+            </div>
+            ${requestStatusBadge(item.status)}
+          </div>
+          <div class="approval-amount">${item.transaction_type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</div>
+          <div class="request-meta">
+            <span>${item.transaction_type === 'income' ? 'Income' : 'Expense'}</span>
+            <span>${formatDate(item.date)}</span>
+            ${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}
+            <span>From ${escapeHtml(item.submitted_by_email || 'Contributor')}</span>
+          </div>
+          <p class="request-description">${escapeHtml(item.description)}</p>
+          ${item.reviewer_note ? `<div class="review-note"><strong>Review note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
+          ${pending ? `<div class="request-actions"><button class="primary-button" data-action="approve-request" data-request-id="${item.id}">✓ Approve and record</button><button class="secondary-button" data-action="reject-request" data-request-id="${item.id}">Reject</button></div>` : '<div class="immutable-note">Review completed. The contributor can no longer edit or delete this request.</div>'}
+        </article>`
+    }).join('')}</div>`
+  }
+
+  function renderApprovals() {
+    const route = getRoute()
+    const focusId = route.query.get('request') || ''
+    const requests = approvalState.requests || []
+    const pending = requests.filter((item) => item.status === 'pending')
+    const history = requests.filter((item) => item.status !== 'pending')
+    const unread = (approvalState.notifications || []).filter((item) => !item.is_read).length
+
+    const content = `
+      ${pageHeader(
+        'Manager approvals',
+        'Review contributor records',
+        'Submitted records stay outside the ledger until you approve them. Approval writes the record; rejection leaves the ledger unchanged.',
+        '<button class="secondary-button" data-action="refresh-approvals">↻ Refresh</button>',
+      )}
+      <section class="summary-grid">
+        ${summaryCard('Pending approval', String(pending.length), '◎', 'Needs your decision')}
+        ${summaryCard('Unread notifications', String(unread), '◉')}
+        ${summaryCard('Contributors', String((approvalState.members || []).filter((item) => item.status === 'active').length), '◇')}
+      </section>
+      ${approvalError ? `<div class="notice danger">${escapeHtml(approvalError)}</div>` : ''}
+      <section class="panel">
+        ${panelHeading('Waiting for approval', pending.length ? `${pending.length} request${pending.length === 1 ? '' : 's'}` : 'Nothing waiting')}
+        ${ownerRequestCards(pending, focusId)}
+      </section>
+      <section class="panel">
+        ${panelHeading('Review history', 'Approved and rejected requests')}
+        ${ownerRequestCards(history, focusId)}
+      </section>`
+
+    setTimeout(() => {
+      if (!focusId) return
+      const target = document.querySelector(`[data-request-id="${CSS.escape(focusId)}"]`)
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 50)
+
+    return shell(content, 'approvals')
+  }
+
+  function renderJoinInvite(token) {
+    return `
+      <div class="auth-page">
+        ${authBrand()}
+        <div class="auth-card">
+          <div class="auth-form-heading">
+            <h2>Join a My Fund account</h2>
+            <p>This invite lets you submit records for the person connected to your email. Your entries will require manager approval before they affect the ledger.</p>
+          </div>
+          <div class="notice">Signed in as <strong>${escapeHtml(signedInEmail())}</strong>. The invite will only work if this is the invited email address.</div>
+          <button class="primary-button full-width" data-action="accept-invite" data-token="${escapeHtml(token)}">Accept contributor access</button>
+          <button class="text-button full-width" data-action="signout">Use a different account</button>
+        </div>
+      </div>`
+  }
+
   function render() {
     clearInterval(viewerTimer)
     if (CLOUD_UNAVAILABLE) {
@@ -1741,18 +2161,57 @@
         <div class="viewer-error">
           <div class="brand-mark">M</div>
           <h1>Cloud service unavailable</h1>
-          <p>My Fund App is configured for cloud storage, but the authentication or Neon data service did not load. Your finance data has not been switched to browser-only storage.</p>
+          <p>My Fund App is configured for Neon cloud services, but the authentication or Data API client did not load. Your finance data has not been switched to browser-only storage.</p>
           <button class="primary-button" onclick="location.reload()">Try again</button>
         </div>`
       return
     }
+
+    const resetToken = new URLSearchParams(location.search).get('token')
+    const resetError = new URLSearchParams(location.search).get('error')
+    if (resetError) {
+      history.replaceState({}, '', location.pathname + (location.hash || ''))
+      renderForgotPassword('This password reset link is invalid or has expired.')
+      return
+    }
+    if (resetToken) {
+      passwordRecoveryMode = true
+      renderPasswordReset()
+      return
+    }
+
     const route = getRoute()
     if (route.path.startsWith('/view/')) {
       loadViewer(route.segments[1])
       return
     }
+
     if (CLOUD_ENABLED && !session) {
-      renderAuth()
+      const inviteMessage = route.path.startsWith('/join/')
+        ? 'Sign in or create an account using the email address that received this contributor invite.'
+        : ''
+      renderAuth(inviteMessage)
+      return
+    }
+
+    if (route.path.startsWith('/join/') && session) {
+      if (isContributor()) {
+        go('/contributor')
+        return
+      }
+      document.getElementById('app').innerHTML = renderJoinInvite(route.segments[1] || '')
+      return
+    }
+
+    if (isContributor()) {
+      let html
+      if (route.path === '/contributor' || route.path === '/' || route.path === '/dashboard') html = renderContributor()
+      else if (route.path === '/requests') html = renderContributorRequests()
+      else {
+        go('/contributor')
+        html = renderContributor()
+      }
+      document.getElementById('app').innerHTML = html
       return
     }
 
@@ -1761,6 +2220,7 @@
     else if (route.path === '/people') html = renderPeople()
     else if (route.segments[0] === 'person' && route.segments[1]) html = renderPerson(route.segments[1])
     else if (route.path === '/transactions') html = renderTransactions()
+    else if (route.path === '/approvals') html = renderApprovals()
     else if (route.path === '/reports') html = renderReports()
     else if (route.path === '/admin') {
       if (!isPlatformAdmin()) {
@@ -1879,6 +2339,62 @@
       </form>`
     openModal(`${type === 'income' ? 'Add income for' : 'Add expense for'} ${person.name}`, body, true)
     renumberTransactionRows()
+  }
+
+  function openContributorRequestModal(options = {}) {
+    const person = contributorState?.person
+    if (!person) return
+
+    const existingRequest = options.requestId
+      ? (contributorState?.requests || []).find((item) => item.id === options.requestId)
+      : null
+    const targetTransaction = options.transactionId
+      ? state.transactions.find((item) => item.id === options.transactionId)
+      : existingRequest?.target_transaction_id
+        ? state.transactions.find((item) => item.id === existingRequest.target_transaction_id)
+        : null
+
+    const seed = existingRequest || targetTransaction || {}
+    const requestAction = existingRequest?.request_action || (targetTransaction ? 'update' : 'create')
+    const type = existingRequest?.transaction_type || targetTransaction?.type || options.type || 'income'
+    const amount = seed.amount ?? ''
+    const currency = seed.currency || state.workspace.default_currency
+    const date = seed.date ? String(seed.date).slice(0, 10) : today()
+    const unknownDate = !seed.date && Boolean(existingRequest || targetTransaction)
+    const description = seed.description || ''
+    const category = seed.category || 'Other'
+
+    const body = `
+      <form class="modal-form" id="contributor-request-form">
+        <input type="hidden" name="request_id" value="${escapeHtml(existingRequest?.id || '')}">
+        <input type="hidden" name="person_id" value="${escapeHtml(person.id)}">
+        <input type="hidden" name="request_action" value="${escapeHtml(requestAction)}">
+        <input type="hidden" name="target_transaction_id" value="${escapeHtml(targetTransaction?.id || existingRequest?.target_transaction_id || '')}">
+        ${currencyDatalist()}
+        <div class="two-fields">
+          <label class="field"><span>Record type</span><select name="type"><option value="income" ${type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${type === 'expense' ? 'selected' : ''}>Expense</option></select></label>
+          <label class="field"><span>Amount</span><input name="amount" type="number" min="0.01" step="0.01" value="${escapeHtml(amount)}" required></label>
+        </div>
+        <div class="two-fields">
+          <label class="field"><span>Currency</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(currency)}" required></label>
+          <label class="field"><span>Date</span><input name="date" type="date" value="${unknownDate ? '' : escapeHtml(date)}" ${unknownDate ? 'disabled' : ''}></label>
+        </div>
+        <label class="checkbox-row"><input name="date_unknown" type="checkbox" data-action="toggle-request-unknown-date" ${unknownDate ? 'checked' : ''}><span>Date unknown or not remembered</span></label>
+        <label class="field"><span>Expense category</span><select name="category">${EXPENSE_CATEGORIES.map((item) => `<option value="${item}" ${item === category ? 'selected' : ''}>${item}</option>`).join('')}</select><small>Ignored when the record type is Income.</small></label>
+        <label class="field"><span>Description</span><input name="description" value="${escapeHtml(description)}" placeholder="What is this record for?" required></label>
+        <div class="notice">${requestAction === 'update' ? 'This requests a correction to an approved record. The original record stays unchanged until the manager approves the update.' : 'This stays pending and does not affect your balance until the manager approves it.'}</div>
+        <div id="contributor-request-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">${existingRequest ? 'Save pending request' : 'Submit for approval'}</button></div>
+      </form>`
+
+    openModal(
+      existingRequest
+        ? 'Edit pending request'
+        : requestAction === 'update'
+          ? 'Request a record update'
+          : 'Submit a new record',
+      body,
+    )
   }
 
   function openStartingBalanceModal(personId, currency) {
@@ -2164,6 +2680,46 @@
     const form = event.target
     if (!(form instanceof HTMLFormElement)) return
 
+    if (form.id === 'invite-contributor-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        const invite = await createContributorInvite(values.person_id, values.email)
+        render()
+        const link = `${location.href.split('#')[0]}#/join/${invite.token}`
+        try { await navigator.clipboard.writeText(link) } catch {}
+        toast('Contributor invite created. The secure invite link has been copied when clipboard access is available.')
+      } catch (error) {
+        toast(error.message || 'Unable to create contributor invite.', 'danger')
+      } finally {
+        busy = false
+      }
+      return
+    }
+
+    if (form.id === 'contributor-request-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('contributor-request-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        values.date_unknown = form.querySelector('input[name="date_unknown"]')?.checked || false
+        if (values.request_id) await updateContributorRequest(values.request_id, values)
+        else await submitContributorRequest(values)
+        closeModal()
+        render()
+        toast(values.request_id ? 'Pending request updated.' : 'Request submitted for manager approval.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message || 'Unable to save request.')}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
+
     if (form.id === 'add-person-form') {
       event.preventDefault()
       if (busy) return
@@ -2307,13 +2863,18 @@
         return
       }
       try {
-        const result = await authDb.auth.updateUser({ password: values.password })
-        if (result.error) throw result.error
+        const token = new URLSearchParams(location.search).get('token')
+        if (!token) throw new Error('This password reset link is missing or has expired.')
+        const betterAuth = authDb.auth.getBetterAuthInstance?.()
+        if (!betterAuth?.resetPassword) throw new Error('Password recovery is unavailable.')
+        const result = await betterAuth.resetPassword({
+          newPassword: values.password,
+          token,
+        })
+        if (result?.error) throw new Error(result.error.message || 'Unable to reset the password.')
         passwordRecoveryMode = false
-        await refreshCloud()
-        go('/dashboard')
-        render()
-        toast('Password updated successfully.')
+        history.replaceState({}, '', location.pathname + (location.hash || ''))
+        renderAuth('Password updated successfully. Sign in with your new password.')
       } catch (error) {
         renderPasswordReset(error.message || 'Unable to update the password.')
       } finally {
@@ -2337,12 +2898,12 @@
                 password: values.password,
                 options: {
                   emailRedirectTo: CONFIG.appUrl || `${location.origin}${location.pathname}`,
-                  data: { app_name: 'my_fund_app' },
+                  data: { displayName: String(values.email || '').split('@')[0] || 'My Fund user' },
                 },
               })
         if (result.error) throw result.error
         if (mode === 'signup' && !result.data.session) {
-          renderAuth('Account created. Check your email if confirmation is enabled in Supabase.')
+          renderAuth('Account created. You can sign in with your Neon Auth account.')
         }
       } catch (error) {
         renderAuth(error.message, mode, values.email)
@@ -2373,6 +2934,127 @@
     }
     if (action === 'back-to-signin') {
       renderAuth()
+      return
+    }
+    if (action === 'accept-invite') {
+      if (busy) return
+      busy = true
+      try {
+        await acceptContributorInvite(target.dataset.token)
+        go('/contributor')
+        render()
+        toast('Contributor access activated.')
+      } catch (error) {
+        toast(error.message || 'Unable to accept this invite.', 'danger')
+      } finally {
+        busy = false
+      }
+      return
+    }
+    if (action === 'toggle-contributor') {
+      if (busy) return
+      busy = true
+      try {
+        await setContributorStatus(target.dataset.memberId, target.dataset.status)
+        render()
+        toast(target.dataset.status === 'active' ? 'Contributor access enabled.' : 'Contributor access disabled.')
+      } catch (error) {
+        toast(error.message || 'Unable to update contributor access.', 'danger')
+      } finally {
+        busy = false
+      }
+      return
+    }
+    if (action === 'revoke-invite') {
+      if (!confirm('Revoke this contributor invite?')) return
+      try {
+        await revokeContributorInvite(target.dataset.inviteId)
+        render()
+        toast('Invite revoked.')
+      } catch (error) {
+        toast(error.message || 'Unable to revoke invite.', 'danger')
+      }
+      return
+    }
+    if (action === 'open-request') {
+      openContributorRequestModal({ type: target.dataset.type || 'income' })
+      return
+    }
+    if (action === 'request-update') {
+      openContributorRequestModal({ transactionId: target.dataset.transactionId })
+      return
+    }
+    if (action === 'edit-request') {
+      openContributorRequestModal({ requestId: target.dataset.requestId })
+      return
+    }
+    if (action === 'delete-request') {
+      if (!confirm('Delete this pending request?')) return
+      try {
+        await deleteContributorRequest(target.dataset.requestId)
+        render()
+        toast('Pending request deleted.')
+      } catch (error) {
+        toast(error.message || 'Unable to delete request.', 'danger')
+      }
+      return
+    }
+    if (action === 'approve-request') {
+      const note = prompt('Optional note for the contributor:', '')
+      if (note === null) return
+      if (!confirm('Approve this request and write it to the real ledger?')) return
+      try {
+        await reviewRecordRequest(target.dataset.requestId, 'approve', note)
+        render()
+        toast('Request approved and recorded.')
+      } catch (error) {
+        toast(error.message || 'Unable to approve request.', 'danger')
+      }
+      return
+    }
+    if (action === 'reject-request') {
+      const note = prompt('Reason for rejection (optional):', '')
+      if (note === null) return
+      try {
+        await reviewRecordRequest(target.dataset.requestId, 'reject', note)
+        render()
+        toast('Request rejected. The ledger was not changed.')
+      } catch (error) {
+        toast(error.message || 'Unable to reject request.', 'danger')
+      }
+      return
+    }
+    if (action === 'refresh-approvals') {
+      approvalLoading = true
+      approvalError = ''
+      try {
+        await refreshApprovalCenter()
+        render()
+        toast('Approval queue refreshed.')
+      } catch (error) {
+        approvalError = error.message || 'Unable to refresh approvals.'
+        render()
+      } finally {
+        approvalLoading = false
+      }
+      return
+    }
+    if (action === 'read-notification') {
+      try {
+        await markNotificationRead(target.dataset.notificationId)
+        render()
+      } catch (error) {
+        toast(error.message || 'Unable to update notification.', 'danger')
+      }
+      return
+    }
+    if (action === 'toggle-request-unknown-date') {
+      const dateInput = target.closest('form')?.querySelector('input[name="date"]')
+      if (dateInput) {
+        dateInput.disabled = target.checked
+        if (target.checked) dateInput.value = ''
+        else if (!dateInput.value) dateInput.value = today()
+      }
       return
     }
     if (action === 'refresh-admin') {
@@ -2477,12 +3159,12 @@
     if (action === 'copy-link') {
       try {
         await navigator.clipboard.writeText(target.dataset.link)
-        toast('Viewer link copied.')
+        toast('Link copied.')
       } catch {
         const input = target.parentElement?.querySelector('input')
         input?.select()
         document.execCommand('copy')
-        toast('Viewer link copied.')
+        toast('Link copied.')
       }
       return
     }
@@ -2567,6 +3249,9 @@
     }
     if (action === 'signout') {
       adminState = null
+      approvalState = { requests: [], notifications: [], members: [], invites: [] }
+      contributorState = null
+      accessContext = null
       await authDb.auth.signOut()
       return
     }
@@ -2596,6 +3281,8 @@
   }
 
   async function init() {
+    await initializeCloudClients()
+
     document.addEventListener('submit', handleSubmit)
     document.addEventListener('click', handleClick)
     document.addEventListener('change', handleChange)

@@ -12,12 +12,7 @@
   <div id="app"><div class="full-page-loading"><div class="loading-mark">M</div><span>Opening My Fund App…</span></div></div>
 
   <script src="config.js"></script>
-  <script>
-    // Supabase is loaded only when cloud credentials are configured.
-    if (window.MY_FUND_CONFIG && window.MY_FUND_CONFIG.supabaseUrl && window.MY_FUND_CONFIG.supabasePublishableKey) {
-      document.write('<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"><\/script>')
-    }
-  </script>
-  <script src="neon-data.js"></script>\n  <script src="app.js"></script>
+  <script src="cloud-client.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

@@ -1,28 +1,100 @@
 # My Fund App — Neon production build
 
-My Fund App tracks money held for different people using starting balances, income, actual expenses, monthly PV and Upkeep limits, negative balances, borrowed funds, goals, exports, secure viewer links, and a platform-admin overview.
+My Fund App tracks money held for different people using starting balances, income, expenses, monthly PV and Upkeep limits, negative balances, borrowed funds, goals, exports, secure viewer links, contributor approvals and platform-admin analytics.
 
-## Production architecture
+## Architecture
 
 - App URL: `https://my-fund-app-one.vercel.app/`
-- Finance database: Neon Postgres, database `my_fund_app`
-- Browser data access: Neon Data API
-- Authentication during the current transition: existing Supabase Auth
+- Database: Neon Postgres, database `my_fund_app`
+- Browser database access: Neon Data API
+- Authentication: Neon Auth
 - Platform administrator: `oyekunleolalekan3168@gmail.com`
 
-The browser never receives a Neon Postgres password. Finance data is protected by Neon row-level security and accessed through the Neon Data API.
+The browser never receives a Postgres password. Neon Auth JWTs are injected into Data API requests and PostgreSQL row-level security controls access.
 
-Supabase is retained temporarily only for sign-in, sign-up, password recovery and existing user sessions. All My Fund App finance data is stored in Neon.
+## Roles
 
-## Neon database setup
+### Workspace owner
 
-The production Neon schema is stored in:
+The owner has the normal My Fund App workspace and can:
+
+- create people
+- record income and expenses directly
+- set starting balances
+- manage PV and Upkeep limits
+- manage goals
+- view reports and exports
+- invite contributors for specific people
+- approve or reject contributor record requests
+- disable contributor access
+
+### Contributor
+
+A contributor is connected to one tracked person by a secure, email-bound invite.
+
+A contributor can:
+
+- see that person's approved records and balances
+- submit a new income or expense request
+- request a correction to an existing approved record
+- edit or delete their own request while it is pending
+- see whether a request was approved or rejected
+- read manager notes
+
+A contributor cannot directly insert, update or delete the real ledger. After a request is approved or rejected, the contributor cannot edit or delete that request.
+
+## Approval workflow
+
+Contributor requests are stored separately in `mfa_record_requests`.
+
+Approval rules are enforced inside Neon:
+
+1. Contributor submits a pending request.
+2. The owner receives an in-app notification.
+3. The real `mfa_transactions` ledger remains unchanged.
+4. The contributor may edit or delete the request while it is pending.
+5. The owner opens **Approvals** and reviews the exact proposed record.
+6. **Approve** inserts a new ledger record or applies the requested update.
+7. **Reject** leaves the ledger unchanged.
+8. The reviewed request becomes immutable to the contributor.
+9. The contributor receives an in-app approved/rejected notification.
+
+PV and Upkeep limits are checked again inside the approval transaction, including update requests, so contributor approvals cannot bypass the finance rules.
+
+## Approval email notifications
+
+When a contributor submits or edits a request, Neon creates an email outbox record containing a deep link such as:
+
+```text
+https://my-fund-app-one.vercel.app/#/approvals?request=<request-id>
+```
+
+The Vercel route `/api/record-request-email` safely claims the outbox item before sending, preventing duplicate sends.
+
+To enable outbound approval emails, configure these Vercel environment variables:
+
+```text
+RESEND_API_KEY=<your Resend API key>
+MY_FUND_FROM_EMAIL=My Fund App <notifications@your-verified-domain.com>
+```
+
+If those variables are not configured, the finance request and in-app notification still work and the email remains pending instead of being falsely marked sent.
+
+## Neon schema
+
+The canonical schema is:
 
 ```text
 neon/schema.sql
 ```
 
-It creates:
+The approval migration is also retained separately at:
+
+```text
+neon/approval-workflow.sql
+```
+
+Core tables:
 
 - `mfa_workspaces`
 - `mfa_app_users`
@@ -30,9 +102,14 @@ It creates:
 - `mfa_transactions`
 - `mfa_monthly_budgets`
 - `mfa_goals`
-- workspace-owner RLS policies
-- secure public-view RPC
-- platform-admin overview RPC
+
+Approval tables:
+
+- `mfa_workspace_members`
+- `mfa_member_invites`
+- `mfa_record_requests`
+- `mfa_notifications`
+- `mfa_email_outbox`
 
 ## Platform administrator
 
@@ -42,20 +119,9 @@ Admin access is restricted in the database and interface to:
 oyekunleolalekan3168@gmail.com
 ```
 
-The admin dashboard provides:
+The admin dashboard includes accounts using the app, people being tracked, total records, gross money tracked by currency, expenses, current holdings, borrowed balances, per-account totals, per-person balances and a dedicated Main account section.
 
-- number of accounts using My Fund App
-- total people being tracked
-- total income and expense records
-- gross money tracked per currency
-- current holdings per currency
-- total expenses per currency
-- borrowed/negative balances per currency
-- per-account people and record counts
-- per-person current balances
-- a dedicated Main account section for the administrator account
-
-### Analytics definitions
+## Financial definitions
 
 **Total money tracked**:
 
@@ -63,60 +129,29 @@ The admin dashboard provides:
 positive opening balances + recorded income
 ```
 
-**Current balance for a person**:
+**Current balance**:
 
 ```text
 starting balance + recorded income - recorded expenses
 ```
 
-**Current platform holdings** are the sum of all current person balances by currency. Negative balances are shown separately as borrowed funds. Currencies are never converted or combined.
-
-## Financial rules
-
-- Starting balance is an opening position, not income or expense.
-- Starting balances can be positive or negative and are stored separately per currency.
-- Only Income and Expense are transactions.
-- PV is an expense category with an adjustable monthly spending limit.
-- Upkeep is an expense category with a monthly limit based on the percentage in Settings.
-- Budgets do not change balances; only recorded expenses do.
-- A person can have a negative balance, displayed as borrowed funds.
-- Workspace totals include starting balances and every positive or negative person balance.
-- Currencies remain separate and are never converted.
-
-## Bulk records
-
-The Income and Expense forms allow multiple rows to be saved together. Every row can have its own:
-
-- Amount
-- Currency
-- Date or Date unknown
-- Expense category, where applicable
-- Description
-
-An unknown-date record affects all-time balances immediately. Because no month is known, it does not count in month-specific reports or against a particular month's PV or Upkeep limit.
-
-## Starting balances
-
-A starting balance can be entered when a person is created. It can also be added or updated later from the person dashboard for any currency.
-
-Updating it recalculates person balance, owner totals, borrowed funds, viewer dashboard, admin overview, reports and exports. It does not create a transaction.
+Currencies are always kept separate.
 
 ## Authentication
 
-The current release keeps the existing Supabase Auth directory so existing users keep their login credentials while the finance database moves to Neon.
+My Fund App uses the Neon Auth integration already available in the Neon project.
 
-Supported flows remain:
+Supported flows:
 
-- Sign in
 - Create account
+- Sign in
 - Forgot password
-- Password reset
-- Show/hide password
+- Reset password
+- Sign out
+- Cross-tab session updates
 
-A later phase can move authentication to Neon Auth if complete Supabase removal is desired.
+The frontend uses `@neondatabase/neon-js` with its Supabase-compatible adapter only as an API style. No Supabase service or Supabase key is used by My Fund App.
 
 ## Deployment
 
-This remains a static Vercel app with no build command. The production Vercel project deploys from the repository's `main` branch.
-
-See `NEON_MIGRATION.md` for migration and rollback details.
+The app deploys from GitHub to Vercel. The static frontend has no build command; `api/record-request-email.js` is deployed as a Vercel serverless function.
