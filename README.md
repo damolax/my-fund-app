@@ -12,7 +12,7 @@ My Fund App tracks money held for different people using starting balances, inco
 
 The browser never receives a Neon Postgres password. Finance data is protected by Neon row-level security and accessed through the Neon Data API.
 
-Supabase is retained temporarily only for sign-in, sign-up, password recovery, existing sessions, and migration of legacy My Fund App records. The legacy Supabase finance tables should remain untouched until the Neon data copy has been fully verified.
+Supabase is retained temporarily only for sign-in, sign-up, password recovery and existing user sessions. All My Fund App finance data is stored in Neon.
 
 ## Neon database setup
 
@@ -33,15 +33,6 @@ It creates:
 - workspace-owner RLS policies
 - secure public-view RPC
 - platform-admin overview RPC
-- per-user and platform-wide Supabase-to-Neon migration RPCs
-
-## Automatic legacy-data migration
-
-When an existing user signs in and Neon does not yet contain that user's workspace, the app first reads that user's existing My Fund App records from Supabase and imports them into Neon while preserving the original IDs.
-
-The platform administrator also has an **Import Supabase data** action that can migrate the full existing My Fund App snapshot into Neon.
-
-This prevents a new empty Neon workspace from replacing an existing Supabase workspace during cutover.
 
 ## Platform administrator
 
