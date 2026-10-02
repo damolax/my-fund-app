@@ -1251,13 +1251,14 @@
       : '<div class="small-empty">No people added yet.</div>'
 
     const content = `
-      ${pageHeader('People', 'People whose funds you hold', 'Create a person using only their name, then enter all previous or new records from their page.')}
+      ${pageHeader('People', 'People whose funds you hold', 'Add each person with their email so they can receive ledger-change notifications and use their secure personal link.')}
       <section class="people-layout">
         <form class="panel add-person-card" id="add-person-form">
           <div class="section-icon">＋</div>
           <h2>Add a person</h2>
-          <p>Only the name is required. A starting balance is optional and can be updated later.</p>
+          <p>Name and email are required. The email receives alerts whenever an approved income or expense record is added, edited or removed.</p>
           <label class="field"><span>Name</span><input name="name" placeholder="Person's full name" required></label>
+          <label class="field"><span>Email for notifications</span><input name="email" type="email" placeholder="person@example.com" required></label>
           <div class="two-fields">
             <label class="field"><span>Starting balance (optional)</span><input name="starting_balance" type="number" step="0.01" placeholder="0.00"></label>
             <label class="field"><span>Currency</span><input name="starting_currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(state.workspace.default_currency)}">${currencyDatalist()}</label>
@@ -1335,6 +1336,8 @@
         <div class="stacked-panels">
           <div class="panel">
             ${panelHeading('Secure person link', 'View records and request new income or expenses')}
+            <div class="share-box"><span>✉</span><div><strong>${escapeHtml(person.email || 'No email attached')}</strong><span>${person.email ? 'Receives alerts when an approved income or expense is added, edited or removed.' : 'Add an email to enable ledger-change alerts.'}</span></div></div>
+            <button class="text-button" data-action="edit-person-email" data-person-id="${person.id}">✎ ${person.email ? 'Change notification email' : 'Add notification email'}</button>
             <div class="share-box"><span>🔗</span><div><strong>Personal finance link</strong><span>${CLOUD_ENABLED ? 'The person can view approved records and submit new records for your approval.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
             <div class="copy-row"><input readonly value="${escapeHtml(viewerLink)}"><button class="secondary-button" data-action="copy-link" data-link="${escapeHtml(viewerLink)}">⧉ Copy</button></div>
             <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace secure link</button><div class="helper-text">The link holder cannot edit or delete approved records. Only pending requests they submit can be changed or removed before you review them.</div>
