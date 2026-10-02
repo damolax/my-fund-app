@@ -2988,6 +2988,25 @@
       }
       return
     }
+    if (form.id === 'edit-transaction-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('edit-transaction-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        values.date_unknown = form.querySelector('input[name="date_unknown"]')?.checked || false
+        await updateTransaction(values.transaction_id, values)
+        closeModal()
+        render()
+        toast('Record updated and notification queued.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message)}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
     if (form.id === 'starting-balance-form') {
       event.preventDefault()
       if (busy) return
@@ -3362,6 +3381,19 @@
     }
     if (action === 'edit-person-email') {
       openPersonEmailModal(target.dataset.personId)
+      return
+    }
+    if (action === 'edit-transaction') {
+      openEditTransactionModal(target.dataset.transactionId)
+      return
+    }
+    if (action === 'toggle-edit-transaction-unknown-date') {
+      const dateInput = target.closest('form')?.querySelector('input[name="date"]')
+      if (dateInput) {
+        dateInput.disabled = target.checked
+        if (target.checked) dateInput.value = ''
+        else if (!dateInput.value) dateInput.value = today()
+      }
       return
     }
     if (action === 'edit-starting-balance') {
