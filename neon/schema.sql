@@ -215,7 +215,7 @@ returns jsonb
 language plpgsql
 security definer
 set search_path = public, auth
-as $
+as $mfa$
 declare
   v_user_id text := (select auth.user_id());
   v_email text := lower(trim(coalesce((select auth.session() ->> 'email'), '')));
@@ -327,7 +327,7 @@ begin
     'transactions', jsonb_array_length(coalesce(p_payload->'transactions', '[]'::jsonb))
   );
 end;
-$;
+$mfa$;
 
 revoke all on function public.mfa_import_own_snapshot(jsonb) from public;
 grant execute on function public.mfa_import_own_snapshot(jsonb) to authenticated;
