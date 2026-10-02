@@ -2167,6 +2167,19 @@
       return
     }
 
+    const resetToken = new URLSearchParams(location.search).get('token')
+    const resetError = new URLSearchParams(location.search).get('error')
+    if (resetError) {
+      history.replaceState({}, '', location.pathname + (location.hash || ''))
+      renderForgotPassword('This password reset link is invalid or has expired.')
+      return
+    }
+    if (resetToken) {
+      passwordRecoveryMode = true
+      renderPasswordReset()
+      return
+    }
+
     const route = getRoute()
     if (route.path.startsWith('/view/')) {
       loadViewer(route.segments[1])
@@ -2850,13 +2863,18 @@
         return
       }
       try {
-        const result = await authDb.auth.updateUser({ password: values.password })
-        if (result.error) throw result.error
+        const token = new URLSearchParams(location.search).get('token')
+        if (!token) throw new Error('This password reset link is missing or has expired.')
+        const betterAuth = authDb.auth.getBetterAuthInstance?.()
+        if (!betterAuth?.resetPassword) throw new Error('Password recovery is unavailable.')
+        const result = await betterAuth.resetPassword({
+          newPassword: values.password,
+          token,
+        })
+        if (result?.error) throw new Error(result.error.message || 'Unable to reset the password.')
         passwordRecoveryMode = false
-        await refreshCloud()
-        go('/dashboard')
-        render()
-        toast('Password updated successfully.')
+        history.replaceState({}, '', location.pathname + (location.hash || ''))
+        renderAuth('Password updated successfully. Sign in with your new password.')
       } catch (error) {
         renderPasswordReset(error.message || 'Unable to update the password.')
       } finally {
@@ -2880,7 +2898,7 @@
                 password: values.password,
                 options: {
                   emailRedirectTo: CONFIG.appUrl || `${location.origin}${location.pathname}`,
-                  data: { app_name: 'my_fund_app' },
+                  data: { displayName: String(values.email || '').split('@')[0] || 'My Fund user' },
                 },
               })
         if (result.error) throw result.error
