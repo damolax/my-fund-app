@@ -14,17 +14,17 @@ There are no legacy My Fund App accounts that require a Supabase account migrati
 
 ## Approval workflow objects
 
-The contributor workflow adds:
+The person-link user workflow adds:
 
 - `mfa_workspace_members`
-- `mfa_member_invites`
+- `mfa_record_requests`
 - `mfa_record_requests`
 - `mfa_notifications`
 - `mfa_email_outbox`
 
-The contributor cannot directly write to `mfa_transactions`. Ledger changes are performed only by the owner-review RPC after the request is approved.
+The person-link user cannot directly write to `mfa_transactions`. Ledger changes are performed only by the owner-review RPC after the request is approved.
 
-Reviewed requests are immutable to the contributor.
+Reviewed requests are immutable to the person-link user.
 
 ## Notification delivery
 
@@ -41,9 +41,9 @@ Required Vercel secrets for outbound email:
 
 - Database passwords are never exposed in the browser.
 - Owner ledger tables remain owner-scoped by RLS.
-- Contributor reads use restricted security-definer RPCs.
-- Contributor writes are requests, not ledger writes.
-- Invite acceptance is bound to the invited email address.
+- person-link user reads use restricted security-definer RPCs.
+- person-link user writes are requests, not ledger writes.
+- The secure person link is the bearer credential; no separate person login or invite is required.
 - Manager review is checked against the workspace owner inside PostgreSQL.
 - PV and Upkeep limits are revalidated during approval.
 - Anonymous direct access to finance tables remains blocked.
