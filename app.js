@@ -1919,6 +1919,207 @@
       .join('')}</div>`
   }
 
+  function requestStatusBadge(status) {
+    const clean = String(status || 'pending')
+    const label = clean === 'approved' ? 'Approved' : clean === 'rejected' ? 'Rejected' : 'Pending approval'
+    return `<span class="request-status ${escapeHtml(clean)}">${label}</span>`
+  }
+
+  function contributorTransactionList(records) {
+    if (!records.length) return '<div class="small-empty">No approved records yet.</div>'
+    return `<div class="transaction-list">${sortTransactions(records, true)
+      .map((item) => `
+        <div class="transaction-row">
+          <div class="transaction-icon ${item.type}">${item.type === 'income' ? '↘' : '↗'}</div>
+          <div class="transaction-main">
+            <strong>${escapeHtml(item.description)}</strong>
+            <span>${item.category ? `${escapeHtml(item.category)} · ` : ''}${formatDate(item.date)}</span>
+          </div>
+          <strong class="${item.type === 'income' ? 'income-text' : ''}">${item.type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</strong>
+          <button class="secondary-button compact-button" data-action="request-update" data-transaction-id="${item.id}">Request update</button>
+        </div>`)
+      .join('')}</div>`
+  }
+
+  function contributorRequestCards(requests) {
+    if (!requests.length) return '<div class="small-empty">No requests submitted yet.</div>'
+    return `<div class="request-list">${requests
+      .map((item) => {
+        const editable = item.status === 'pending'
+        const actionLabel = item.request_action === 'update' ? 'Update record' : 'New record'
+        return `
+          <article class="request-card" data-request-id="${item.id}">
+            <div class="request-card-head">
+              <div><span class="eyebrow">${actionLabel}</span><h3>${escapeHtml(item.description)}</h3></div>
+              ${requestStatusBadge(item.status)}
+            </div>
+            <div class="request-meta">
+              <span>${item.transaction_type === 'income' ? 'Income' : 'Expense'}</span>
+              <strong>${money(item.amount, item.currency)}</strong>
+              <span>${formatDate(item.date)}</span>
+              ${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}
+            </div>
+            ${item.reviewer_note ? `<div class="review-note"><strong>Manager note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
+            ${editable ? `<div class="request-actions"><button class="secondary-button" data-action="edit-request" data-request-id="${item.id}">Edit</button><button class="text-button danger-text" data-action="delete-request" data-request-id="${item.id}">Delete request</button></div>` : '<div class="immutable-note">This request is locked because it has already been reviewed.</div>'}
+          </article>`
+      })
+      .join('')}</div>`
+  }
+
+  function contributorNotifications() {
+    const notifications = contributorState?.notifications || []
+    if (!notifications.length) return '<div class="small-empty">No notifications yet.</div>'
+    return `<div class="notification-list">${notifications.slice(0, 20).map((item) => `
+      <button class="notification-item ${item.is_read ? '' : 'unread'}" data-action="read-notification" data-notification-id="${item.id}">
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.body)}</span>
+        <small>${formatTimestamp(item.created_at)}</small>
+      </button>`).join('')}</div>`
+  }
+
+  function renderContributor() {
+    const person = contributorState?.person
+    if (!person) return shell('<section class="panel empty-state"><h2>Contributor access unavailable</h2><p>Your account is not connected to a person yet.</p></section>', 'contributor')
+
+    const currencies = uniqueCurrencies(person.id)
+    const balanceCards = (currencies.length ? currencies : [state.workspace.default_currency]).map((currency) => {
+      const position = personPosition(person.id, currency)
+      return summaryCard(
+        `${currency} current balance`,
+        money(position.balance, currency),
+        '▣',
+        `${money(position.income, currency)} income · ${money(position.expenses, currency)} expenses`,
+        position.balance < 0,
+      )
+    }).join('')
+
+    const pending = (contributorState.requests || []).filter((item) => item.status === 'pending').length
+    const content = `
+      ${pageHeader(
+        'Contributor account',
+        person.name,
+        'You can submit new records or corrections. Nothing changes the real ledger until the account manager approves it.',
+        `<div class="button-row"><button class="secondary-button" data-action="open-request" data-type="expense">↗ Request expense</button><button class="primary-button" data-action="open-request" data-type="income">↘ Request income</button></div>`,
+      )}
+      <section class="summary-card-grid four">
+        ${balanceCards}
+        ${summaryCard('Pending requests', String(pending), '◎', 'Editable until the manager reviews them')}
+      </section>
+      <section class="panel">
+        ${panelHeading('Approved records', `${state.transactions.length} recorded item${state.transactions.length === 1 ? '' : 's'}`)}
+        ${contributorTransactionList(state.transactions)}
+      </section>
+      <section class="panel">
+        ${panelHeading('Notifications', 'Approval and rejection updates')}
+        ${contributorNotifications()}
+      </section>`
+    return shell(content, 'contributor')
+  }
+
+  function renderContributorRequests() {
+    const requests = contributorState?.requests || []
+    const pending = requests.filter((item) => item.status === 'pending').length
+    const content = `
+      ${pageHeader(
+        'Request history',
+        'Your record requests',
+        'Pending requests can be edited or deleted. Once approved or rejected, they are locked.',
+        `<div class="button-row"><button class="secondary-button" data-action="open-request" data-type="expense">↗ Expense request</button><button class="primary-button" data-action="open-request" data-type="income">↘ Income request</button></div>`,
+      )}
+      <section class="summary-grid">
+        ${summaryCard('Pending', String(pending), '◎', 'Waiting for manager review')}
+        ${summaryCard('Approved', String(requests.filter((item) => item.status === 'approved').length), '✓')}
+        ${summaryCard('Rejected', String(requests.filter((item) => item.status === 'rejected').length), '×')}
+      </section>
+      <section class="panel">
+        ${contributorRequestCards(requests)}
+      </section>`
+    return shell(content, 'requests')
+  }
+
+  function ownerRequestCards(requests, focusId = '') {
+    if (!requests.length) return '<div class="small-empty">No submitted requests yet.</div>'
+    return `<div class="request-list">${requests.map((item) => {
+      const pending = item.status === 'pending'
+      const focused = focusId && item.id === focusId
+      return `
+        <article class="request-card ${focused ? 'request-focus' : ''}" data-request-id="${item.id}">
+          <div class="request-card-head">
+            <div>
+              <span class="eyebrow">${item.request_action === 'update' ? 'Record update request' : 'New record request'}</span>
+              <h3>${escapeHtml(item.person_name || 'Person')}</h3>
+            </div>
+            ${requestStatusBadge(item.status)}
+          </div>
+          <div class="approval-amount">${item.transaction_type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</div>
+          <div class="request-meta">
+            <span>${item.transaction_type === 'income' ? 'Income' : 'Expense'}</span>
+            <span>${formatDate(item.date)}</span>
+            ${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}
+            <span>From ${escapeHtml(item.submitted_by_email || 'Contributor')}</span>
+          </div>
+          <p class="request-description">${escapeHtml(item.description)}</p>
+          ${item.reviewer_note ? `<div class="review-note"><strong>Review note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
+          ${pending ? `<div class="request-actions"><button class="primary-button" data-action="approve-request" data-request-id="${item.id}">✓ Approve and record</button><button class="secondary-button" data-action="reject-request" data-request-id="${item.id}">Reject</button></div>` : '<div class="immutable-note">Review completed. The contributor can no longer edit or delete this request.</div>'}
+        </article>`
+    }).join('')}</div>`
+  }
+
+  function renderApprovals() {
+    const route = getRoute()
+    const focusId = route.query.get('request') || ''
+    const requests = approvalState.requests || []
+    const pending = requests.filter((item) => item.status === 'pending')
+    const history = requests.filter((item) => item.status !== 'pending')
+    const unread = (approvalState.notifications || []).filter((item) => !item.is_read).length
+
+    const content = `
+      ${pageHeader(
+        'Manager approvals',
+        'Review contributor records',
+        'Submitted records stay outside the ledger until you approve them. Approval writes the record; rejection leaves the ledger unchanged.',
+        '<button class="secondary-button" data-action="refresh-approvals">↻ Refresh</button>',
+      )}
+      <section class="summary-grid">
+        ${summaryCard('Pending approval', String(pending.length), '◎', 'Needs your decision')}
+        ${summaryCard('Unread notifications', String(unread), '◉')}
+        ${summaryCard('Contributors', String((approvalState.members || []).filter((item) => item.status === 'active').length), '◇')}
+      </section>
+      ${approvalError ? `<div class="notice danger">${escapeHtml(approvalError)}</div>` : ''}
+      <section class="panel">
+        ${panelHeading('Waiting for approval', pending.length ? `${pending.length} request${pending.length === 1 ? '' : 's'}` : 'Nothing waiting')}
+        ${ownerRequestCards(pending, focusId)}
+      </section>
+      <section class="panel">
+        ${panelHeading('Review history', 'Approved and rejected requests')}
+        ${ownerRequestCards(history, focusId)}
+      </section>`
+
+    setTimeout(() => {
+      if (!focusId) return
+      const target = document.querySelector(`[data-request-id="${CSS.escape(focusId)}"]`)
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 50)
+
+    return shell(content, 'approvals')
+  }
+
+  function renderJoinInvite(token) {
+    return `
+      <div class="auth-page">
+        ${authBrand()}
+        <div class="auth-card">
+          <div class="auth-form-heading">
+            <h2>Join a My Fund account</h2>
+            <p>This invite lets you submit records for the person connected to your email. Your entries will require manager approval before they affect the ledger.</p>
+          </div>
+          <div class="notice">Signed in as <strong>${escapeHtml(signedInEmail())}</strong>. The invite will only work if this is the invited email address.</div>
+          <button class="primary-button full-width" data-action="accept-invite" data-token="${escapeHtml(token)}">Accept contributor access</button>
+          <button class="text-button full-width" data-action="signout">Use a different account</button>
+        </div>
+      </div>`
+  }
+
   function render() {
     clearInterval(viewerTimer)
     if (CLOUD_UNAVAILABLE) {
