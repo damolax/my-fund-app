@@ -44,13 +44,14 @@ The platform admin and import functions also verify the authenticated admin emai
 
 1. Verify that the current Supabase Auth JWT signing configuration can be validated by Neon's external-JWKS Data API configuration.
 2. Apply `neon/schema.sql` to the production `my_fund_app` Neon database.
-3. Deploy the `neon-migration` application branch.
+3. The Neon-backed application code is merged to `main` for production deployment.
 4. Sign in with the platform-admin account.
-5. Open **Platform admin** and click **Import Supabase data**.
-6. Compare user, workspace, person and transaction counts and verify balances.
-7. Keep Supabase tables unchanged until the Neon copy has been verified.
-8. After verification, remove the temporary import function/button.
-9. Optional phase 2: migrate authentication to Neon Auth so Supabase can be removed entirely.
+5. Existing users automatically import their own legacy workspace on first login when Neon has no workspace yet.
+6. Open **Platform admin** and click **Import Supabase data** to migrate all known My Fund App accounts at once.
+7. Compare user, workspace, person and transaction counts and verify balances.
+8. Keep Supabase tables unchanged until the Neon copy has been verified.
+9. After verification, remove the temporary import function/button.
+10. Optional phase 2: migrate authentication to Neon Auth so Supabase can be removed entirely.
 
 ## Rollback
 
@@ -67,4 +68,4 @@ On an isolated Neon test branch:
 - the tokenized public-view RPC returned only the selected person's records;
 - the frontend Neon adapter passed syntax and request-shape checks.
 
-Production schema/data have not been cut over yet.
+Production Neon schema has been applied and the Neon-backed application code has been merged to `main`. Legacy Supabase finance data is preserved as the migration source until it has been copied and verified in Neon.
