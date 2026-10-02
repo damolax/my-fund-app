@@ -39,6 +39,8 @@
   let accessContext = null
   let approvalState = { requests: [], notifications: [], members: [], invites: [] }
   let contributorState = null
+  let viewerState = null
+  let viewerToken = ''
   let approvalLoading = false
   let approvalError = ''
 
@@ -1214,26 +1216,7 @@
     )
     const base = location.href.split('#')[0]
     const viewerLink = `${base}#/view/${person.share_token}`
-    const contributorMembers = (approvalState.members || []).filter((item) => item.person_id === person.id)
-    const contributorInvites = (approvalState.invites || []).filter((item) => item.person_id === person.id)
-    const contributorAccessRows = [
-      ...contributorMembers.map((member) => {
-        const enabled = member.status === 'active'
-        return `<div class="access-row">
-          <div><strong>${escapeHtml(member.email)}</strong><span>${enabled ? 'Active contributor' : 'Access disabled'}</span></div>
-          <button class="text-button" data-action="toggle-contributor" data-member-id="${member.id}" data-status="${enabled ? 'disabled' : 'active'}">${enabled ? 'Disable' : 'Enable'}</button>
-        </div>`
-      }),
-      ...contributorInvites
-        .filter((invite) => !invite.accepted_at && !invite.revoked_at && new Date(invite.expires_at) > new Date())
-        .map((invite) => {
-          const link = `${base}#/join/${invite.token}`
-          return `<div class="access-row">
-            <div><strong>${escapeHtml(invite.email)}</strong><span>Invite pending until ${formatTimestamp(invite.expires_at)}</span></div>
-            <div class="row-actions"><button class="text-button" data-action="copy-link" data-link="${escapeHtml(link)}">Copy invite</button><button class="text-button danger-text" data-action="revoke-invite" data-invite-id="${invite.id}">Revoke</button></div>
-          </div>`
-        }),
-    ].join('') || '<div class="small-empty">No contributor access has been granted yet.</div>'
+
 
     const currencySelect = currencyChoiceOptions(currency)
 
@@ -1267,20 +1250,10 @@
         </div>
         <div class="stacked-panels">
           <div class="panel">
-            ${panelHeading('Secure read-only link', 'The person sees only their own records')}
-            <div class="share-box"><span>🔗</span><div><strong>Viewer link</strong><span>${CLOUD_ENABLED ? 'Updates automatically from the cloud.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
+            ${panelHeading('Secure person link', 'View records and request new income or expenses')}
+            <div class="share-box"><span>🔗</span><div><strong>Personal finance link</strong><span>${CLOUD_ENABLED ? 'The person can view approved records and submit new records for your approval.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
             <div class="copy-row"><input readonly value="${escapeHtml(viewerLink)}"><button class="secondary-button" data-action="copy-link" data-link="${escapeHtml(viewerLink)}">⧉ Copy</button></div>
-            <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace viewer link</button>
-          </div>
-          <div class="panel">
-            ${panelHeading('Contributor access', 'Let this person submit records for approval')}
-            <form id="invite-contributor-form" class="invite-form">
-              <input type="hidden" name="person_id" value="${person.id}">
-              <label class="field"><span>Contributor email</span><input name="email" type="email" placeholder="person@example.com" required></label>
-              <button class="secondary-button full-width">Create secure invite</button>
-            </form>
-            <div class="access-list">${contributorAccessRows}</div>
-            <div class="helper-text">Contributors can only submit pending requests. They cannot write, edit or delete approved ledger records.</div>
+            <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace secure link</button><div class="helper-text">The link holder cannot edit or delete approved records. Only pending requests they submit can be changed or removed before you review them.</div>
           </div>
           <div class="panel">
             ${panelHeading('Savings goals', `${goals.length} tracked`, `<button class="text-button" data-action="open-goal" data-person-id="${person.id}" data-currency="${currency}">＋ Add goal</button>`)}
@@ -2092,11 +2065,11 @@
             <span>${item.transaction_type === 'income' ? 'Income' : 'Expense'}</span>
             <span>${formatDate(item.date)}</span>
             ${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}
-            <span>From ${escapeHtml(item.submitted_by_email || 'Contributor')}</span>
+            <span>From ${escapeHtml(item.source_label || 'Personal secure link')}</span>
           </div>
           <p class="request-description">${escapeHtml(item.description)}</p>
           ${item.reviewer_note ? `<div class="review-note"><strong>Review note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
-          ${pending ? `<div class="request-actions"><button class="primary-button" data-action="approve-request" data-request-id="${item.id}">✓ Approve and record</button><button class="secondary-button" data-action="reject-request" data-request-id="${item.id}">Reject</button></div>` : '<div class="immutable-note">Review completed. The contributor can no longer edit or delete this request.</div>'}
+          ${pending ? `<div class="request-actions"><button class="primary-button" data-action="approve-request" data-request-id="${item.id}">✓ Approve and record</button><button class="secondary-button" data-action="reject-request" data-request-id="${item.id}">Reject</button></div>` : '<div class="immutable-note">Review completed. The person can no longer edit or delete this request.</div>'}
         </article>`
     }).join('')}</div>`
   }
@@ -2112,14 +2085,14 @@
     const content = `
       ${pageHeader(
         'Manager approvals',
-        'Review contributor records',
-        'Submitted records stay outside the ledger until you approve them. Approval writes the record; rejection leaves the ledger unchanged.',
+        'Review person-submitted records',
+        'Requests from secure person links stay outside the ledger until you approve them. Approval creates the real record; rejection leaves the ledger unchanged.',
         '<button class="secondary-button" data-action="refresh-approvals">↻ Refresh</button>',
       )}
       <section class="summary-grid">
         ${summaryCard('Pending approval', String(pending.length), '◎', 'Needs your decision')}
         ${summaryCard('Unread notifications', String(unread), '◉')}
-        ${summaryCard('Contributors', String((approvalState.members || []).filter((item) => item.status === 'active').length), '◇')}
+        ${summaryCard('People with requests', String(new Set(requests.map((item) => item.person_id)).size), '◇')}
       </section>
       ${approvalError ? `<div class="notice danger">${escapeHtml(approvalError)}</div>` : ''}
       <section class="panel">
@@ -2189,33 +2162,13 @@
     }
 
     if (CLOUD_ENABLED && !session) {
-      const inviteMessage = route.path.startsWith('/join/')
-        ? 'Sign in or create an account using the email address that received this contributor invite.'
-        : ''
-      renderAuth(inviteMessage)
+      renderAuth()
       return
     }
 
-    if (route.path.startsWith('/join/') && session) {
-      if (isContributor()) {
-        go('/contributor')
-        return
-      }
-      document.getElementById('app').innerHTML = renderJoinInvite(route.segments[1] || '')
-      return
-    }
 
-    if (isContributor()) {
-      let html
-      if (route.path === '/contributor' || route.path === '/' || route.path === '/dashboard') html = renderContributor()
-      else if (route.path === '/requests') html = renderContributorRequests()
-      else {
-        go('/contributor')
-        html = renderContributor()
-      }
-      document.getElementById('app').innerHTML = html
-      return
-    }
+
+
 
     let html
     if (route.path === '/dashboard' || route.path === '/') html = renderDashboard()
@@ -3002,7 +2955,7 @@
       return
     }
     if (action === 'approve-request') {
-      const note = prompt('Optional note for the contributor:', '')
+      const note = prompt('Optional note for the person:', '')
       if (note === null) return
       if (!confirm('Approve this request and write it to the real ledger?')) return
       try {
