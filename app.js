@@ -2127,18 +2127,44 @@
         <div class="viewer-error">
           <div class="brand-mark">M</div>
           <h1>Cloud service unavailable</h1>
-          <p>My Fund App is configured for cloud storage, but the authentication or Neon data service did not load. Your finance data has not been switched to browser-only storage.</p>
+          <p>My Fund App is configured for Neon cloud services, but the authentication or Data API client did not load. Your finance data has not been switched to browser-only storage.</p>
           <button class="primary-button" onclick="location.reload()">Try again</button>
         </div>`
       return
     }
+
     const route = getRoute()
     if (route.path.startsWith('/view/')) {
       loadViewer(route.segments[1])
       return
     }
+
     if (CLOUD_ENABLED && !session) {
-      renderAuth()
+      const inviteMessage = route.path.startsWith('/join/')
+        ? 'Sign in or create an account using the email address that received this contributor invite.'
+        : ''
+      renderAuth(inviteMessage)
+      return
+    }
+
+    if (route.path.startsWith('/join/') && session) {
+      if (isContributor()) {
+        go('/contributor')
+        return
+      }
+      document.getElementById('app').innerHTML = renderJoinInvite(route.segments[1] || '')
+      return
+    }
+
+    if (isContributor()) {
+      let html
+      if (route.path === '/contributor' || route.path === '/' || route.path === '/dashboard') html = renderContributor()
+      else if (route.path === '/requests') html = renderContributorRequests()
+      else {
+        go('/contributor')
+        html = renderContributor()
+      }
+      document.getElementById('app').innerHTML = html
       return
     }
 
@@ -2147,6 +2173,7 @@
     else if (route.path === '/people') html = renderPeople()
     else if (route.segments[0] === 'person' && route.segments[1]) html = renderPerson(route.segments[1])
     else if (route.path === '/transactions') html = renderTransactions()
+    else if (route.path === '/approvals') html = renderApprovals()
     else if (route.path === '/reports') html = renderReports()
     else if (route.path === '/admin') {
       if (!isPlatformAdmin()) {
