@@ -759,9 +759,11 @@
     saveLocal()
   }
 
-  async function createPerson(name, startingCurrency = '', startingAmount = '') {
+  async function createPerson(name, email, startingCurrency = '', startingAmount = '') {
     const clean = String(name || '').trim()
+    const cleanEmail = String(email || '').trim().toLowerCase()
     if (!clean) throw new Error('Enter the person’s name.')
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Enter a valid email address for this person.')
     const currency = String(startingCurrency || state.workspace.default_currency || 'NGN').trim().toUpperCase()
     const hasStartingAmount = String(startingAmount ?? '').trim() !== ''
     const startingBalances = hasStartingAmount ? { [currency]: round(startingAmount) } : {}
@@ -770,6 +772,7 @@
         id: id(),
         workspace_id: state.workspace.id,
         name: clean,
+        email: cleanEmail,
         starting_balances: startingBalances,
         share_token: id(),
         created_at: new Date().toISOString(),
@@ -782,6 +785,7 @@
       .insert({
         workspace_id: state.workspace.id,
         name: clean,
+        email: cleanEmail,
         starting_balances: startingBalances,
       })
       .select('*')
@@ -789,6 +793,29 @@
     if (result.error) throw result.error
     await refreshCloud()
     return { ...result.data, starting_balances: result.data.starting_balances || {} }
+  }
+
+  async function updatePersonEmail(personId, email) {
+    const person = personById(personId)
+    if (!person) throw new Error('Person not found.')
+    const cleanEmail = String(email || '').trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Enter a valid email address.')
+
+    if (!CLOUD_ENABLED) {
+      await mutateLocal((draft) => {
+        draft.people = draft.people.map((item) =>
+          item.id === personId ? { ...item, email: cleanEmail } : item,
+        )
+      })
+      return
+    }
+
+    const result = await db
+      .from('mfa_people')
+      .update({ email: cleanEmail })
+      .eq('id', personId)
+    if (result.error) throw result.error
+    await refreshCloud()
   }
 
   async function updateStartingBalance(personId, currencyValue, amountValue) {
