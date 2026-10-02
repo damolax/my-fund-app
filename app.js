@@ -39,6 +39,8 @@
   let accessContext = null
   let approvalState = { requests: [], notifications: [], members: [], invites: [] }
   let contributorState = null
+  let viewerState = null
+  let viewerToken = ''
   let approvalLoading = false
   let approvalError = ''
 
@@ -1214,26 +1216,7 @@
     )
     const base = location.href.split('#')[0]
     const viewerLink = `${base}#/view/${person.share_token}`
-    const contributorMembers = (approvalState.members || []).filter((item) => item.person_id === person.id)
-    const contributorInvites = (approvalState.invites || []).filter((item) => item.person_id === person.id)
-    const contributorAccessRows = [
-      ...contributorMembers.map((member) => {
-        const enabled = member.status === 'active'
-        return `<div class="access-row">
-          <div><strong>${escapeHtml(member.email)}</strong><span>${enabled ? 'Active contributor' : 'Access disabled'}</span></div>
-          <button class="text-button" data-action="toggle-contributor" data-member-id="${member.id}" data-status="${enabled ? 'disabled' : 'active'}">${enabled ? 'Disable' : 'Enable'}</button>
-        </div>`
-      }),
-      ...contributorInvites
-        .filter((invite) => !invite.accepted_at && !invite.revoked_at && new Date(invite.expires_at) > new Date())
-        .map((invite) => {
-          const link = `${base}#/join/${invite.token}`
-          return `<div class="access-row">
-            <div><strong>${escapeHtml(invite.email)}</strong><span>Invite pending until ${formatTimestamp(invite.expires_at)}</span></div>
-            <div class="row-actions"><button class="text-button" data-action="copy-link" data-link="${escapeHtml(link)}">Copy invite</button><button class="text-button danger-text" data-action="revoke-invite" data-invite-id="${invite.id}">Revoke</button></div>
-          </div>`
-        }),
-    ].join('') || '<div class="small-empty">No contributor access has been granted yet.</div>'
+
 
     const currencySelect = currencyChoiceOptions(currency)
 
@@ -1267,20 +1250,10 @@
         </div>
         <div class="stacked-panels">
           <div class="panel">
-            ${panelHeading('Secure read-only link', 'The person sees only their own records')}
-            <div class="share-box"><span>🔗</span><div><strong>Viewer link</strong><span>${CLOUD_ENABLED ? 'Updates automatically from the cloud.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
+            ${panelHeading('Secure person link', 'View records and request new income or expenses')}
+            <div class="share-box"><span>🔗</span><div><strong>Personal finance link</strong><span>${CLOUD_ENABLED ? 'The person can view approved records and submit new records for your approval.' : 'Local mode: it works only where this browser data exists.'}</span></div></div>
             <div class="copy-row"><input readonly value="${escapeHtml(viewerLink)}"><button class="secondary-button" data-action="copy-link" data-link="${escapeHtml(viewerLink)}">⧉ Copy</button></div>
-            <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace viewer link</button>
-          </div>
-          <div class="panel">
-            ${panelHeading('Contributor access', 'Let this person submit records for approval')}
-            <form id="invite-contributor-form" class="invite-form">
-              <input type="hidden" name="person_id" value="${person.id}">
-              <label class="field"><span>Contributor email</span><input name="email" type="email" placeholder="person@example.com" required></label>
-              <button class="secondary-button full-width">Create secure invite</button>
-            </form>
-            <div class="access-list">${contributorAccessRows}</div>
-            <div class="helper-text">Contributors can only submit pending requests. They cannot write, edit or delete approved ledger records.</div>
+            <button class="text-button" data-action="regenerate-link" data-person-id="${person.id}">↻ Replace secure link</button><div class="helper-text">The link holder cannot edit or delete approved records. Only pending requests they submit can be changed or removed before you review them.</div>
           </div>
           <div class="panel">
             ${panelHeading('Savings goals', `${goals.length} tracked`, `<button class="text-button" data-action="open-goal" data-person-id="${person.id}" data-currency="${currency}">＋ Add goal</button>`)}
@@ -1790,6 +1763,7 @@
 
   async function loadViewer(token) {
     clearInterval(viewerTimer)
+    viewerToken = token
     document.getElementById('app').innerHTML = '<div class="full-page-loading"><div class="loading-mark">M</div><span>Opening the read-only dashboard…</span></div>'
     try {
       let payload
@@ -1806,6 +1780,7 @@
             month: String(item.month).slice(0, 7),
           })),
           goals: result.data.goals || [],
+          requests: result.data.requests || [],
         }
       } else {
         const local = loadLocal()
@@ -1817,8 +1792,10 @@
           transactions: local.transactions.filter((item) => item.person_id === person.id),
           budgets: local.budgets.filter((item) => item.person_id === person.id),
           goals: local.goals.filter((item) => item.person_id === person.id),
+          requests: [],
         }
       }
+      viewerState = payload
       renderViewer(payload)
       viewerTimer = setInterval(async () => {
         if (!getRoute().path.startsWith('/view/')) return clearInterval(viewerTimer)
@@ -1836,6 +1813,7 @@
                   month: String(item.month).slice(0, 7),
                 })),
                 goals: result.data.goals || [],
+                requests: result.data.requests || [],
               }
             }
           } else {
@@ -1851,14 +1829,18 @@
               }
             }
           }
-          if (refreshed) renderViewer(refreshed)
+          if (refreshed) {
+            viewerState = refreshed
+            renderViewer(refreshed)
+          }
         } catch {
           // Keep the last successful view visible.
         }
       }, 5000)
     } catch (error) {
+      viewerState = null
       document.getElementById('app').innerHTML = `
-        <div class="viewer-error"><div class="brand-mark">M</div><h1>Viewer link unavailable</h1><p>${escapeHtml(error.message)}</p></div>`
+        <div class="viewer-error"><div class="brand-mark">M</div><h1>Secure link unavailable</h1><p>${escapeHtml(error.message)}</p></div>`
     }
   }
 
@@ -1876,7 +1858,106 @@
       </article>`
   }
 
+  async function triggerPublicRequestEmail(requestId) {
+    if (!requestId || !viewerToken) return
+    try {
+      await fetch('/api/record-request-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id: requestId, share_token: viewerToken }),
+      })
+    } catch {
+      // The manager's in-app notification remains active even if outbound email is unavailable.
+    }
+  }
+
+  async function submitViewerRequest(values) {
+    const result = await db.rpc('mfa_submit_public_record_request', {
+      p_token: viewerToken,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || viewerState?.workspace?.default_currency || 'NGN').trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerPublicRequestEmail(result.data?.id)
+    return result.data
+  }
+
+  async function updateViewerRequest(requestId, values) {
+    const result = await db.rpc('mfa_update_public_record_request', {
+      p_token: viewerToken,
+      p_request_id: requestId,
+      p_transaction_type: values.type,
+      p_amount: round(values.amount),
+      p_currency: String(values.currency || viewerState?.workspace?.default_currency || 'NGN').trim().toUpperCase(),
+      p_date: values.date_unknown || !values.date ? null : values.date,
+      p_description: String(values.description || '').trim(),
+      p_category: values.type === 'expense' ? values.category : null,
+    })
+    if (result.error) throw result.error
+    await triggerPublicRequestEmail(requestId)
+    return result.data
+  }
+
+  async function deleteViewerRequest(requestId) {
+    const result = await db.rpc('mfa_delete_public_record_request', {
+      p_token: viewerToken,
+      p_request_id: requestId,
+    })
+    if (result.error) throw result.error
+  }
+
+  function viewerRequestCards(requests) {
+    if (!requests.length) return '<div class="small-empty">You have not submitted any record requests yet.</div>'
+    return `<div class="request-list">${requests.map((item) => {
+      const editable = item.status === 'pending'
+      return `
+        <article class="request-card" data-request-id="${item.id}">
+          <div class="request-card-head">
+            <div><span class="eyebrow">New ${item.transaction_type === 'income' ? 'income' : 'expense'} record</span><h3>${escapeHtml(item.description)}</h3></div>
+            ${requestStatusBadge(item.status)}
+          </div>
+          <div class="request-meta"><strong>${item.transaction_type === 'income' ? '+' : '−'}${money(item.amount, item.currency)}</strong><span>${formatDate(item.date)}</span>${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}</div>
+          ${item.reviewer_note ? `<div class="review-note"><strong>Manager note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
+          ${editable ? `<div class="request-actions"><button class="secondary-button" data-action="viewer-edit-request" data-request-id="${item.id}">Edit pending request</button><button class="text-button danger-text" data-action="viewer-delete-request" data-request-id="${item.id}">Delete pending request</button></div>` : `<div class="immutable-note">${item.status === 'approved' ? 'Approved and recorded. This ledger record cannot be changed from your link.' : 'Rejected. This request is locked and did not change the ledger.'}</div>`}
+        </article>`
+    }).join('')}</div>`
+  }
+
+  function openViewerRequestModal(options = {}) {
+    if (!viewerState?.person || !CLOUD_ENABLED) return
+    const existing = options.requestId ? (viewerState.requests || []).find((item) => item.id === options.requestId) : null
+    if (existing && existing.status !== 'pending') {
+      toast('Only pending requests can be edited.', 'danger')
+      return
+    }
+    const type = existing?.transaction_type || options.type || 'income'
+    const amount = existing?.amount ?? ''
+    const currency = existing?.currency || viewerState.workspace.default_currency
+    const date = existing?.date ? String(existing.date).slice(0, 10) : today()
+    const unknownDate = existing ? !existing.date : false
+    const description = existing?.description || ''
+    const category = existing?.category || 'Other'
+    const body = `
+      <form class="modal-form" id="viewer-request-form">
+        <input type="hidden" name="request_id" value="${escapeHtml(existing?.id || '')}">
+        ${currencyDatalist()}
+        <div class="two-fields"><label class="field"><span>Record type</span><select name="type"><option value="income" ${type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${type === 'expense' ? 'selected' : ''}>Expense</option></select></label><label class="field"><span>Amount</span><input name="amount" type="number" min="0.01" step="0.01" value="${escapeHtml(amount)}" required></label></div>
+        <div class="two-fields"><label class="field"><span>Currency</span><input name="currency" list="currency-codes" maxlength="3" pattern="[A-Za-z]{3}" value="${escapeHtml(currency)}" required></label><label class="field"><span>Date</span><input name="date" type="date" value="${unknownDate ? '' : escapeHtml(date)}" ${unknownDate ? 'disabled' : ''}></label></div>
+        <label class="checkbox-row"><input name="date_unknown" type="checkbox" data-action="viewer-toggle-request-unknown-date" ${unknownDate ? 'checked' : ''}><span>Date unknown or not remembered</span></label>
+        <label class="field"><span>Expense category</span><select name="category">${EXPENSE_CATEGORIES.map((item) => `<option value="${item}" ${item === category ? 'selected' : ''}>${item}</option>`).join('')}</select><small>Ignored when the record type is Income.</small></label>
+        <label class="field"><span>Description</span><input name="description" value="${escapeHtml(description)}" placeholder="What is this record for?" required></label>
+        <div class="notice">This only requests a new record. Approved records cannot be edited or deleted from this link. Your balance changes only after the manager approves it.</div>
+        <div id="viewer-request-error"></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button class="primary-button">${existing ? 'Save pending request' : 'Submit for approval'}</button></div>
+      </form>`
+    openModal(existing ? 'Edit pending request' : `Request new ${type} record`, body)
+  }
   function renderViewer(payload) {
+    viewerState = payload
     const person = { ...payload.person, starting_balances: payload.person.starting_balances || {} }
     const data = {
       workspace: payload.workspace,
@@ -1931,11 +2012,12 @@
     document.getElementById('app').innerHTML = `
       <div class="viewer-page">
         <header class="viewer-header">
-          <div class="brand-row viewer-brand"><div class="brand-mark">M</div><div><strong>${escapeHtml(payload.workspace.name || 'My Fund App')}</strong><span>Read-only finance dashboard</span></div></div>
+          <div class="brand-row viewer-brand"><div class="brand-mark">M</div><div><strong>${escapeHtml(payload.workspace.name || 'My Fund App')}</strong><span>Personal finance record</span></div></div>
           <div><div class="live-badge"><span class="status-dot"></span>Updated automatically</div><div class="viewer-refresh">Checks every 5 seconds</div></div>
         </header>
         <main class="viewer-main">
-          ${pageHeader('Your records', person.name, 'Income, actual expenses, monthly limits and current balances. A minus balance means borrowed funds are currently in use.')}
+          ${pageHeader('Your money record', person.name, 'You can see approved income and expenses here. You may request a new income or expense record, but nothing changes your balance until the manager approves it.', '<div class="button-row"><button class="secondary-button" data-action="viewer-open-request" data-type="expense">↗ Request expense</button><button class="primary-button" data-action="viewer-open-request" data-type="income">↘ Request income</button></div>')}
+          <section class="panel"><div class="panel-heading"><div><h2>Your record requests</h2><p>Pending requests can be edited or deleted. Approved records are locked.</p></div></div>${viewerRequestCards(payload.requests || [])}</section>
           <div class="viewer-currencies">${sections}</div>
         </main>
       </div>`
@@ -2092,11 +2174,11 @@
             <span>${item.transaction_type === 'income' ? 'Income' : 'Expense'}</span>
             <span>${formatDate(item.date)}</span>
             ${item.category ? `<span>${escapeHtml(item.category)}</span>` : ''}
-            <span>From ${escapeHtml(item.submitted_by_email || 'Contributor')}</span>
+            <span>From ${escapeHtml(item.source_label || 'Personal secure link')}</span>
           </div>
           <p class="request-description">${escapeHtml(item.description)}</p>
           ${item.reviewer_note ? `<div class="review-note"><strong>Review note:</strong> ${escapeHtml(item.reviewer_note)}</div>` : ''}
-          ${pending ? `<div class="request-actions"><button class="primary-button" data-action="approve-request" data-request-id="${item.id}">✓ Approve and record</button><button class="secondary-button" data-action="reject-request" data-request-id="${item.id}">Reject</button></div>` : '<div class="immutable-note">Review completed. The contributor can no longer edit or delete this request.</div>'}
+          ${pending ? `<div class="request-actions"><button class="primary-button" data-action="approve-request" data-request-id="${item.id}">✓ Approve and record</button><button class="secondary-button" data-action="reject-request" data-request-id="${item.id}">Reject</button></div>` : '<div class="immutable-note">Review completed. The person can no longer edit or delete this request.</div>'}
         </article>`
     }).join('')}</div>`
   }
@@ -2112,14 +2194,14 @@
     const content = `
       ${pageHeader(
         'Manager approvals',
-        'Review contributor records',
-        'Submitted records stay outside the ledger until you approve them. Approval writes the record; rejection leaves the ledger unchanged.',
+        'Review person-submitted records',
+        'Requests from secure person links stay outside the ledger until you approve them. Approval creates the real record; rejection leaves the ledger unchanged.',
         '<button class="secondary-button" data-action="refresh-approvals">↻ Refresh</button>',
       )}
       <section class="summary-grid">
         ${summaryCard('Pending approval', String(pending.length), '◎', 'Needs your decision')}
         ${summaryCard('Unread notifications', String(unread), '◉')}
-        ${summaryCard('Contributors', String((approvalState.members || []).filter((item) => item.status === 'active').length), '◇')}
+        ${summaryCard('People with requests', String(new Set(requests.map((item) => item.person_id)).size), '◇')}
       </section>
       ${approvalError ? `<div class="notice danger">${escapeHtml(approvalError)}</div>` : ''}
       <section class="panel">
@@ -2189,33 +2271,13 @@
     }
 
     if (CLOUD_ENABLED && !session) {
-      const inviteMessage = route.path.startsWith('/join/')
-        ? 'Sign in or create an account using the email address that received this contributor invite.'
-        : ''
-      renderAuth(inviteMessage)
+      renderAuth()
       return
     }
 
-    if (route.path.startsWith('/join/') && session) {
-      if (isContributor()) {
-        go('/contributor')
-        return
-      }
-      document.getElementById('app').innerHTML = renderJoinInvite(route.segments[1] || '')
-      return
-    }
 
-    if (isContributor()) {
-      let html
-      if (route.path === '/contributor' || route.path === '/' || route.path === '/dashboard') html = renderContributor()
-      else if (route.path === '/requests') html = renderContributorRequests()
-      else {
-        go('/contributor')
-        html = renderContributor()
-      }
-      document.getElementById('app').innerHTML = html
-      return
-    }
+
+
 
     let html
     if (route.path === '/dashboard' || route.path === '/') html = renderDashboard()
@@ -2682,6 +2744,26 @@
     const form = event.target
     if (!(form instanceof HTMLFormElement)) return
 
+    if (form.id === 'viewer-request-form') {
+      event.preventDefault()
+      if (busy) return
+      busy = true
+      const errorBox = document.getElementById('viewer-request-error')
+      try {
+        const values = Object.fromEntries(new FormData(form).entries())
+        values.date_unknown = form.querySelector('input[name="date_unknown"]')?.checked || false
+        if (values.request_id) await updateViewerRequest(values.request_id, values)
+        else await submitViewerRequest(values)
+        closeModal()
+        await loadViewer(viewerToken)
+        toast(values.request_id ? 'Pending request updated.' : 'Request sent for manager approval.')
+      } catch (error) {
+        if (errorBox) errorBox.innerHTML = `<div class="notice danger" style="margin-top:12px">${escapeHtml(error.message || 'Unable to save request.')}</div>`
+      } finally {
+        busy = false
+      }
+      return
+    }
     if (form.id === 'invite-contributor-form') {
       event.preventDefault()
       if (busy) return
@@ -2978,7 +3060,34 @@
       }
       return
     }
-    if (action === 'open-request') {
+    if (action === 'viewer-open-request') {
+      openViewerRequestModal({ type: target.dataset.type || 'income' })
+      return
+    }
+    if (action === 'viewer-edit-request') {
+      openViewerRequestModal({ requestId: target.dataset.requestId })
+      return
+    }
+    if (action === 'viewer-delete-request') {
+      if (!confirm('Delete this pending request?')) return
+      try {
+        await deleteViewerRequest(target.dataset.requestId)
+        await loadViewer(viewerToken)
+        toast('Pending request deleted.')
+      } catch (error) {
+        toast(error.message || 'Unable to delete request.', 'danger')
+      }
+      return
+    }
+    if (action === 'viewer-toggle-request-unknown-date') {
+      const dateInput = target.closest('form')?.querySelector('input[name="date"]')
+      if (dateInput) {
+        dateInput.disabled = target.checked
+        if (target.checked) dateInput.value = ''
+        else if (!dateInput.value) dateInput.value = today()
+      }
+      return
+    }    if (action === 'open-request') {
       openContributorRequestModal({ type: target.dataset.type || 'income' })
       return
     }
@@ -3002,7 +3111,7 @@
       return
     }
     if (action === 'approve-request') {
-      const note = prompt('Optional note for the contributor:', '')
+      const note = prompt('Optional note for the person:', '')
       if (note === null) return
       if (!confirm('Approve this request and write it to the real ledger?')) return
       try {
