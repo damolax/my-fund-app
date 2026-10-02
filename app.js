@@ -36,6 +36,11 @@
   let adminLoading = false
   let adminError = ''
   let passwordRecoveryMode = false
+  let accessContext = null
+  let approvalState = { requests: [], notifications: [], members: [], invites: [] }
+  let contributorState = null
+  let approvalLoading = false
+  let approvalError = ''
 
   async function initializeCloudClients() {
     if (!CLOUD_CONFIGURED) return
@@ -176,6 +181,40 @@
     adminState = result.data || { users: [], workspaces: [], people: [], transactions: [], budgets: [], goals: [] }
     adminError = ''
     return adminState
+  }
+
+  function isContributor() {
+    return accessContext?.role === 'contributor'
+  }
+
+  function isOwner() {
+    return accessContext?.role === 'owner'
+  }
+
+  async function refreshApprovalCenter() {
+    if (!CLOUD_ENABLED || !session?.user || !isOwner()) return approvalState
+    const result = await db.rpc('mfa_get_approval_center')
+    if (result.error) throw result.error
+    approvalState = result.data || { requests: [], notifications: [], members: [], invites: [] }
+    approvalError = ''
+    return approvalState
+  }
+
+  async function refreshContributorDashboard() {
+    if (!CLOUD_ENABLED || !session?.user || !isContributor()) return null
+    const result = await db.rpc('mfa_get_contributor_dashboard')
+    if (result.error) throw result.error
+    contributorState = result.data || null
+    if (contributorState) {
+      state = normalizeCloudData({
+        workspace: contributorState.workspace,
+        people: contributorState.person ? [contributorState.person] : [],
+        transactions: contributorState.transactions || [],
+        budgets: contributorState.budgets || [],
+        goals: contributorState.goals || [],
+      })
+    }
+    return contributorState
   }
 
   function normalizeCloudData(payload) {
