@@ -905,10 +905,12 @@
         description: payload.description,
         category: payload.category,
       })),
-    )
+    ).select('*')
     if (result.error) throw result.error
+    const created = result.data || []
+    await Promise.all(created.map((item) => triggerLedgerEmail(item.id, 'created')))
     await refreshCloud()
-    return result.data || payloads
+    return created.length ? created : payloads
   }
 
   async function addTransaction(values) {
@@ -959,6 +961,40 @@
     }
   }
 
+  async function updateTransaction(transactionId, values) {
+    const existing = state.transactions.find((item) => item.id === transactionId)
+    if (!existing) throw new Error('Record not found.')
+    const payload = normalizeTransactionValues({ ...values, person_id: existing.person_id })
+    if (!payload.amount || payload.amount <= 0) throw new Error('Amount must be greater than zero.')
+    if (!payload.description) throw new Error('Description is required.')
+    if (!/^[A-Z]{3}$/.test(payload.currency)) throw new Error('Use a valid three-letter currency code.')
+    if (payload.type === 'expense' && !EXPENSE_CATEGORIES.includes(payload.category)) {
+      throw new Error('Choose a valid expense category.')
+    }
+
+    if (!CLOUD_ENABLED) {
+      await mutateLocal((draft) => {
+        draft.transactions = draft.transactions.map((item) =>
+          item.id === transactionId ? { ...item, ...payload, id: transactionId, created_at: item.created_at } : item,
+        )
+      })
+      return
+    }
+
+    const result = await db.rpc('mfa_update_owner_transaction', {
+      p_transaction_id: transactionId,
+      p_transaction_type: payload.type,
+      p_amount: payload.amount,
+      p_currency: payload.currency,
+      p_date: payload.date,
+      p_description: payload.description,
+      p_category: payload.category,
+    })
+    if (result.error) throw result.error
+    await triggerLedgerEmail(transactionId, 'updated')
+    await refreshCloud()
+  }
+
   async function deleteTransaction(transactionId) {
     if (!CLOUD_ENABLED) {
       await mutateLocal((draft) => {
@@ -968,6 +1004,7 @@
     }
     const result = await db.from('mfa_transactions').delete().eq('id', transactionId)
     if (result.error) throw result.error
+    await triggerLedgerEmail(transactionId, 'deleted')
     await refreshCloud()
   }
 
