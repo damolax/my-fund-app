@@ -129,7 +129,7 @@ set search_path = public, auth
 as $$
 declare
   v_user_id text := (select auth.user_id());
-  v_email text := lower(trim(coalesce((select auth.session() ->> 'email'), '')));
+  v_email text := lower(trim(coalesce((select auth.session() ->> 'email'), (select auth.session() -> 'user' ->> 'email'), (select auth.session() ->> 'user_email'), '')));
 begin
   if coalesce(v_user_id, '') = '' then
     raise exception 'Authentication required';
@@ -156,7 +156,7 @@ security definer
 set search_path = public, auth
 as $$
 declare
-  v_email text := lower(trim(coalesce((select auth.session() ->> 'email'), '')));
+  v_email text := lower(trim(coalesce((select auth.session() ->> 'email'), (select auth.session() -> 'user' ->> 'email'), (select auth.session() ->> 'user_email'), '')));
 begin
   if coalesce((select auth.user_id()), '') = '' then
     raise exception 'Authentication required';
