@@ -1,9 +1,9 @@
 window.MY_FUND_CONFIG = {
-  // Neon Auth handles sign-in, sign-up, sessions and password recovery.
-  neonAuthUrl: 'https://ep-cool-lake-b5w5dfc2.neonauth.c-7.us-east-2.aws.neon.tech/author_scout_bot/auth',
+  // Route Neon Auth through the current app origin so alternate production hosts work without browser CORS issues.
+  neonAuthUrl: `${window.location.origin}/neon-auth`,
 
-  // All My Fund App finance data is stored in Neon through the Data API.
-  neonDataApiUrl: 'https://ep-cool-lake-b5w5dfc2.apirest.c-7.us-east-2.aws.neon.tech/my_fund_app/rest/v1',
+  // Route all finance data through the current app origin; the server securely proxies to Neon Data API.
+  neonDataApiUrl: `${window.location.origin}/neon-data`,
 
   adminEmail: 'oyekunleolalekan3168@gmail.com',
   appUrl: `${window.location.origin}/`
