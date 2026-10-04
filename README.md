@@ -208,3 +208,5 @@ The person-facing secure finance link does not require a login.
 ## Deployment
 
 The app deploys from GitHub to Vercel. `api/record-request-email.js` is deployed as a Vercel serverless function.
+
+<!-- deployment-retry: 2026-10-04 -->
