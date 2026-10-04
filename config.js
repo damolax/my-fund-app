@@ -6,5 +6,5 @@ window.MY_FUND_CONFIG = {
   neonDataApiUrl: 'https://ep-cool-lake-b5w5dfc2.apirest.c-7.us-east-2.aws.neon.tech/my_fund_app/rest/v1',
 
   adminEmail: 'oyekunleolalekan3168@gmail.com',
-  appUrl: 'https://my-fund-app-one.vercel.app/'
+  appUrl: `${window.location.origin}/`
 };
