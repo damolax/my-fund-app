@@ -1,4 +1,5 @@
 const DATA_API_URL = process.env.MY_FUND_DATA_API_URL || 'https://ep-cool-lake-b5w5dfc2.apirest.c-7.us-east-2.aws.neon.tech/my_fund_app/rest/v1'
+const PUBLIC_APP_URL = (process.env.MY_FUND_PUBLIC_URL || 'https://my-fund-app-live.onrender.com').replace(/\/$/, '')
 
 async function rpc(name, payload, authorization) {
   const response = await fetch(`${DATA_API_URL}/rpc/${name}`, {
@@ -94,7 +95,7 @@ module.exports = async function handler(req, res) {
         from: fromEmail,
         to: [claimed.recipient_email],
         subject: claimed.subject,
-        html: claimed.html_body,
+        html: String(claimed.html_body || '').replaceAll('https://my-fund-app-one.vercel.app', PUBLIC_APP_URL),
       }),
     })
 
